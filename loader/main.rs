@@ -35,6 +35,8 @@ Options:
                        defaults if missing [default: config.toml]
       --reset-state    Forget verified connections and known IPs kept from
                        an earlier run before starting (bans stay)
+      --check          Load the filter with this configuration into the
+                       kernel to see whether it is accepted, attach nothing
       --license        Print license information
   -h, --help           Print help
   -V, --version        Print version";
@@ -49,6 +51,8 @@ struct Args {
     license: bool,
     /// Remove the pinned state maps before loading.
     reset_state: bool,
+    /// Only check that the kernel accepts the program.
+    check: bool,
 }
 
 /// Hand-rolled argument parsing (a CLI library would double the binary size
@@ -59,6 +63,7 @@ fn parse_args() -> Args {
         config: "config.toml".into(),
         license: false,
         reset_state: false,
+        check: false,
     };
 
     let mut argv = std::env::args().skip(1);
@@ -78,6 +83,7 @@ fn parse_args() -> Args {
             }
             "--license" => args.license = true,
             "--reset-state" => args.reset_state = true,
+            "--check" => args.check = true,
             "-c" | "--config" => match argv.next() {
                 Some(value) => args.config = value,
                 None => invalid(format!("missing value for '{arg} <FILE>'")),
@@ -91,7 +97,7 @@ fn parse_args() -> Args {
         }
     }
 
-    if args.interface.is_none() && !args.license {
+    if args.interface.is_none() && !args.license && !args.check {
         invalid("missing required argument <INTERFACE>".into());
     }
     args
@@ -160,10 +166,16 @@ fn main() {
 
 /// Attaches the XDP filter and keeps it alive until shutdown is triggered.
 fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
+    if args.check {
+        ebpf::check(config)?;
+        info!("The kernel accepted the filter with this configuration");
+        return Ok(());
+    }
+
     let interface = args
         .interface
         .as_deref()
-        .context("interface is required unless --license is specified")?;
+        .context("interface is required unless --license or --check is specified")?;
 
     if args.reset_state {
         ebpf::remove_state(config, false);

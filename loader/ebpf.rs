@@ -236,6 +236,77 @@ fn random_seed() -> u64 {
 /// No userspace involvement is needed while it runs: all state expires
 /// lazily inside the program.
 pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
+    let Loaded {
+        mut ebpf,
+        pins,
+        cpus,
+        adopt_mode,
+    } = load(config, true)?;
+    let program: &mut Xdp = ebpf
+        .program_mut("minecraft_filter")
+        .context("program 'minecraft_filter' not found")?
+        .try_into()?;
+
+    // without pinned maps there is no state directory to pin the link in
+    let pin = (!pins.is_empty()).then(|| link_pin(config, interface));
+
+    let took_over = match &pin {
+        Some(pin) if pin.exists() => match take_over(program, pin) {
+            Ok(()) => true,
+            Err(e) => {
+                // e.g. the interface was recreated; removing the pin detaches
+                // whatever is left of the old attachment
+                warn!("Could not take over the existing attachment ({e:#}), attaching anew");
+                std::fs::remove_file(pin)
+                    .with_context(|| format!("failed to remove '{}'", pin.display()))?;
+                false
+            }
+        },
+        _ => false,
+    };
+
+    if took_over {
+        info!("BPF program attached to interface {interface}: took over the existing attachment without a gap");
+    } else {
+        let (link_id, mode) = attach(program, interface, config.xdp.mode)?;
+        if let Some(pin) = &pin {
+            // the pin, not this process, keeps the filter attached from now on
+            let link = program.take_link(link_id)?;
+            let link = FdLink::try_from(link)
+                .context("this kernel attaches XDP without a link that could be pinned")?;
+            link.pin(pin)
+                .with_context(|| format!("failed to pin the attachment at '{}'", pin.display()))?;
+        }
+        info!("BPF program attached to interface {interface} in {mode} mode");
+    }
+
+    log_protection(config, cpus, adopt_mode);
+    Ok(Filter {
+        ebpf,
+        link_pin: pin,
+    })
+}
+
+/// The program after it passed the verifier, not attached yet.
+struct Loaded {
+    ebpf: Ebpf,
+    /// Pin paths of the state maps; empty if they could not be pinned.
+    pins: Vec<(&'static str, PathBuf)>,
+    cpus: u32,
+    adopt_mode: u8,
+}
+
+/// `xdp-loader --check`: loads the program with this configuration into the
+/// kernel, which runs it through the verifier, and unloads it again.
+/// Nothing is attached and no state of a running loader is touched.
+pub fn check(config: &Config) -> Result<()> {
+    load(config, false).map(|_| ())
+}
+
+/// Loads the embedded eBPF object with the runtime configuration applied.
+/// With `use_state` the state maps are pinned (and those of an earlier run
+/// reused).
+fn load(config: &Config, use_state: bool) -> Result<Loaded> {
     let object = include_bytes_aligned!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/xdp/minecraft_filter.o"
@@ -350,15 +421,19 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
     let good_after_ns = attack.good_after_secs * NSEC_PER_SEC;
     let good_ttl_ns = attack.good_ttl_hours * 3600 * NSEC_PER_SEC;
 
-    if !config.xdp.keep_state {
-        // nothing of an earlier run may be picked up
-        remove_state(config, true);
-    }
-    let pins = match prepare_state(config) {
-        Ok(pins) => pins,
-        Err(e) => {
-            warn!("Running without pinned maps (no state across restarts, no `xdp-loader deny`): {e:#}");
-            Vec::new()
+    let pins = if !use_state {
+        Vec::new()
+    } else {
+        if !config.xdp.keep_state {
+            // nothing of an earlier run may be picked up
+            remove_state(config, true);
+        }
+        match prepare_state(config) {
+            Ok(pins) => pins,
+            Err(e) => {
+                warn!("Running without pinned maps (no state across restarts, no `xdp-loader deny`): {e:#}");
+                Vec::new()
+            }
         }
     };
 
@@ -447,43 +522,11 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
         .try_into()?;
     program.load()?;
 
-    // without pinned maps there is no state directory to pin the link in
-    let pin = (!pins.is_empty()).then(|| link_pin(config, interface));
-
-    let took_over = match &pin {
-        Some(pin) if pin.exists() => match take_over(program, pin) {
-            Ok(()) => true,
-            Err(e) => {
-                // e.g. the interface was recreated; removing the pin detaches
-                // whatever is left of the old attachment
-                warn!("Could not take over the existing attachment ({e:#}), attaching anew");
-                std::fs::remove_file(pin)
-                    .with_context(|| format!("failed to remove '{}'", pin.display()))?;
-                false
-            }
-        },
-        _ => false,
-    };
-
-    if took_over {
-        info!("BPF program attached to interface {interface}: took over the existing attachment without a gap");
-    } else {
-        let (link_id, mode) = attach(program, interface, config.xdp.mode)?;
-        if let Some(pin) = &pin {
-            // the pin, not this process, keeps the filter attached from now on
-            let link = program.take_link(link_id)?;
-            let link = FdLink::try_from(link)
-                .context("this kernel attaches XDP without a link that could be pinned")?;
-            link.pin(pin)
-                .with_context(|| format!("failed to pin the attachment at '{}'", pin.display()))?;
-        }
-        info!("BPF program attached to interface {interface} in {mode} mode");
-    }
-
-    log_protection(config, cpus, adopt_mode);
-    Ok(Filter {
+    Ok(Loaded {
         ebpf,
-        link_pin: pin,
+        pins,
+        cpus,
+        adopt_mode,
     })
 }
 

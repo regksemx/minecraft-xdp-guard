@@ -257,9 +257,12 @@ sudo dev/e2e-test.sh          # the real loader between a client and stand-in se
 sudo dev/load-test.sh         # spoofed floods from all cpus while real clients keep playing
 ```
 
-`dev/kernel-test.sh` attaches nothing and is safe to run on a production
-machine: it is the quickest way to check that the kernel there accepts the
-program.
+To find out whether the kernel of a machine accepts the filter, run
+`xdp-loader --check -c config.toml` there: it loads the program with that
+configuration through the verifier and unloads it again, without attaching
+anything or touching a running filter. `dev/kernel-test.sh` goes further and
+runs every test against that kernel; it attaches nothing either, but needs
+clang, libbpf and bpftool.
 
 ## Troubleshooting
 

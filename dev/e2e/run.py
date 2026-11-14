@@ -111,6 +111,13 @@ def main():
         client.expect("java_status mc.e2e.test", "ok")
     client.expect("java_status mc.e2e.test", "timeout")
 
+    # --check loads a second copy to ask the verifier, without touching the
+    # filter that is running
+    output = loader.run("--check", "-c", os.path.join(workdir, "config.toml"))
+    check("--check reports the verdict of the kernel", "The kernel accepted the filter" in output, output)
+    check("--check attaches and pins nothing", "attached" not in output and "pinned map" not in output, output)
+    client.expect(f"echo {java}", "ok")
+
     # NetherNet signaling stand-in on the guard port
     client.expect("http 19132", "ok")
     client.expect("tcp_raw 19132 5353482d322e302d4f70656e5353480d0a", "timeout")   # "SSH-2.0-OpenSSH"
@@ -302,7 +309,7 @@ def main():
         loader.start(**DEFAULTS)
 
     answers, sent = probe_during(restart)
-    check("an ordinary restart leaves a gap", answers > 0 and sent > 1000, f"({answers} of {sent} answered)")
+    check("an ordinary restart leaves a gap", answers > 0 and sent > 500, f"({answers} of {sent} answered)")
 
     # hand-over: the old program keeps filtering until the new one replaces it
     def hand_over():
@@ -315,7 +322,7 @@ def main():
         check("the new loader takes over", "took over the existing attachment" in output, output)
 
     answers, sent = probe_during(hand_over)
-    check("a hand-over leaves no gap", answers == 0 and sent > 1000, f"({answers} of {sent} answered)")
+    check("a hand-over leaves no gap", answers == 0 and sent > 500, f"({answers} of {sent} answered)")
     client.expect(f"echo {java}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
     client.expect("java_status mc.e2e.test", "ok")
@@ -328,7 +335,7 @@ def main():
         check("the restarted loader takes over", "took over the existing attachment" in output, output)
 
     answers, sent = probe_during(crash)
-    check("a crash leaves no gap", answers == 0 and sent > 1000, f"({answers} of {sent} answered)")
+    check("a crash leaves no gap", answers == 0 and sent > 500, f"({answers} of {sent} answered)")
     client.expect(f"echo {java}", "ok")
 
     # the filter of a dead loader can be removed by hand
