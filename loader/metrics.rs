@@ -84,6 +84,9 @@ statistics! {
     UdpUntracked       => "minecraft_udp_untracked", "UDP datagrams of unknown sessions";
     UdpAdopted         => "minecraft_udp_adopted", "UDP sessions adopted after the filter was attached";
     UdpRateLimited     => "minecraft_udp_rate_limited", "Datagrams of verified UDP sessions above their packet rate";
+
+    UdpguardVerified   => "minecraft_udp_guard_verified", "UDP guard sessions opened";
+    UdpguardInvalid    => "minecraft_udp_guard_invalid", "UDP guard datagrams with the wrong first byte or size";
 }
 
 /// Userspace mirror of `struct statistics` (one per-cpu slot of `stats_map`).
@@ -179,6 +182,7 @@ impl FloodLog {
                 (Stat::RaknetInvalid, "invalid raknet"),
                 (Stat::IceInvalid, "invalid ice"),
                 (Stat::GuardInvalid, "invalid guard"),
+                (Stat::UdpguardInvalid, "invalid udp guard"),
                 (Stat::TcpBypass, "tcp flags"),
                 (Stat::TcpRateLimited, "tcp flow rate"),
                 (Stat::UdpRateLimited, "udp flow rate"),
@@ -343,7 +347,7 @@ mod tests {
             .collect();
         assert_eq!(c_names, STAT_NAMES);
         assert_eq!(Stat::IncomingPackets as usize, 0);
-        assert_eq!(Stat::UdpRateLimited as usize, STAT_COUNT - 1);
+        assert_eq!(Stat::UdpguardInvalid as usize, STAT_COUNT - 1);
         assert_eq!(std::mem::size_of::<Statistics>(), STAT_COUNT * 8);
     }
 

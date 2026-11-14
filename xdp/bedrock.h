@@ -117,6 +117,20 @@ static __always_inline __u8 inspect_stun_binding(const __u8 *payload, const __u8
 }
 
 /* ------------------------------------------------------------------------
+ * Generic UDP guard: for services without a handshake the filter could
+ * follow (e.g. voice chat). Every datagram has to have a minimum size and,
+ * if configured, a fixed first byte; rate limits do the rest.
+ * --------------------------------------------------------------------- */
+
+#define UDPGUARD_ANY_BYTE 256
+
+// returns 1 if a datagram with this first byte and payload length is acceptable
+static __always_inline __u8 udp_guard_valid(const __u8 first, const __u64 len)
+{
+    return len >= UDPGUARD_MIN_LEN && (UDPGUARD_FIRST_BYTE == UDPGUARD_ANY_BYTE || first == UDPGUARD_FIRST_BYTE);
+}
+
+/* ------------------------------------------------------------------------
  * Generic TCP guard: the first payload of the connection has to open a
  * protocol the service behind the port speaks.
  * --------------------------------------------------------------------- */

@@ -162,6 +162,15 @@ def rak_stray():
     return rak_data(keep(new_udp()))
 
 
+def voice(hex_payload, handle=""):
+    """Sends a datagram to the voice chat stand-in, from a kept socket if given."""
+    sock = handles[handle] if handle else new_udp()
+    payload = bytes.fromhex(hex_payload)
+    if udp_exchange(sock, 24454, payload) != payload:
+        return "bad reply"
+    return "ok " + (handle or keep(sock))
+
+
 def stray_burst(seconds):
     """Sends game data without a session every 2ms and counts the answers:
     any answer means a packet got past the filter."""

@@ -63,6 +63,9 @@ enum stat_id
     STAT_UDP_ADOPTED,       // session from before the filter was attached
     STAT_UDP_RATE_LIMITED,  // verified session above its packet rate
 
+    STAT_UDPGUARD_VERIFIED, // generic UDP guard sessions opened
+    STAT_UDPGUARD_INVALID,  // datagrams with the wrong first byte or size
+
     STAT_COUNT
 };
 

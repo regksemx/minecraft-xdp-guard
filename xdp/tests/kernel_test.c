@@ -77,6 +77,7 @@ static __u64 monotonic_ns(void)
 #define GUARD_PORT 19132  // NetherNet signaling shares its number with RakNet
 #define RAKNET_PORT 19132
 #define ICE_PORT 27020
+#define VOICE_PORT 24454
 #define OTHER_PORT 22
 
 #define SERVER_IP 0x0A000001u // 10.0.0.1
@@ -113,6 +114,11 @@ static void base_config(struct minecraft_filter *s)
     s->rodata->ICE_START_PORT = ICE_PORT;
     s->rodata->ICE_END_PORT = ICE_PORT + 9;
     s->rodata->UDP_IDLE_NS = 30 * SEC;
+
+    s->rodata->UDPGUARD_START_PORT = VOICE_PORT;
+    s->rodata->UDPGUARD_END_PORT = VOICE_PORT;
+    s->rodata->UDPGUARD_FIRST_BYTE = 0xFF;
+    s->rodata->UDPGUARD_MIN_LEN = 17;
 
     s->rodata->RETRY_MASK = RETRY_SLOTS - 1;
     s->rodata->RETRY_MIN_TICKS = 3;   // ~200ms
@@ -1136,6 +1142,59 @@ static void test_ice(void)
     DROPS(udp_to(CLIENT_IP, 7002, ICE_PORT, bad.b, 10));
 }
 
+static void udp_guard_limits(struct minecraft_filter *s)
+{
+    s->rodata->UDP_OPEN_HITS = 2;
+    s->rodata->UDP_FLOW_PPS = 4;
+}
+
+static void udp_guard_any_byte(struct minecraft_filter *s)
+{
+    s->rodata->UDPGUARD_FIRST_BYTE = 256;
+}
+
+static void test_udp_guard(void)
+{
+    LOAD_OR_RETURN(udp_guard_limits);
+    __u8 voice[40];
+    memset(voice, 0x11, sizeof(voice));
+    voice[0] = 0xFF;
+
+    // the first acceptable datagram opens the session
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    CHECK(stat(STAT_UDPGUARD_VERIFIED) == 1);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, 17));
+    // wrong first byte or too short: dropped even inside a session
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, 16));
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, "\x01 raknet ping or whatever", 27));
+    DROPS(udp_to(CLIENT_IP, 8001, VOICE_PORT, "\x16 dtls or whatever......", 27));
+    CHECK(stat(STAT_UDPGUARD_INVALID) == 3);
+
+    // packet rate of one session: 4 per second, 2 are used
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    CHECK(stat(STAT_UDP_RATE_LIMITED) == 1);
+
+    // new sessions per ip: 2 per window, one is used
+    PASSES(udp_to(CLIENT_IP, 8001, VOICE_PORT, voice, sizeof(voice)));
+    DROPS(udp_to(CLIENT_IP, 8002, VOICE_PORT, voice, sizeof(voice)));
+    CHECK(stat(STAT_UDP_OPEN_THROTTLED) == 1);
+    PASSES(udp_to(CLIENT_IP + 1, 8002, VOICE_PORT, voice, sizeof(voice)));
+
+    // without a fixed first byte only the size counts
+    LOAD_OR_RETURN(udp_guard_any_byte);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, "any first byte will do here", 27));
+    DROPS(udp_to(CLIENT_IP, 8001, VOICE_PORT, "too short", 9));
+
+    // unknown ips are challenged like everywhere else
+    LOAD_OR_RETURN(with_challenge_always);
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    sleep_ms(400);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, 30)); // any later datagram of the socket
+    PASSES(udp_to(CLIENT_IP, 8001, VOICE_PORT, voice, sizeof(voice)));
+}
+
 static void with_lists(struct minecraft_filter *s)
 {
     s->rodata->HAS_ALLOW = 1;
@@ -1448,6 +1507,7 @@ int main(int argc, char **argv)
     test_guard_tls_only();
     test_raknet();
     test_ice();
+    test_udp_guard();
     test_lists();
     test_adopt_blind();
     test_adopt_socket();

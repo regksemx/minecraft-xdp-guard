@@ -72,6 +72,12 @@ volatile const __u32 PING_BUDGET = 0;      // unconnected pings per cpu
 volatile const __u32 ICE_START_PORT = 0;   // 0 = off
 volatile const __u32 ICE_END_PORT = 0;
 
+/* --- generic UDP guard (e.g. voice chat) -------------------------------- */
+volatile const __u32 UDPGUARD_START_PORT = 0; // 0 = off
+volatile const __u32 UDPGUARD_END_PORT = 0;
+volatile const __u32 UDPGUARD_FIRST_BYTE = 0; // every datagram has to start with this byte, 256 = any
+volatile const __u32 UDPGUARD_MIN_LEN = 0;    // minimum UDP payload of every datagram
+
 /* --- shared by all UDP ports ----------------------------------------- */
 volatile const __u32 UDP_OPEN_HITS = 0;    // new UDP sessions per ip
 volatile const __u32 UDP_OPEN_BUDGET = 0;  // new UDP sessions per cpu

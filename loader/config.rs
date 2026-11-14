@@ -69,6 +69,19 @@ open_request_min_size = 400
 ice_start_port = 0
 ice_end_port = 0
 
+[udp_guard]
+# Generic guard for other UDP services, e.g. a voice chat. There is no
+# handshake the filter could follow, so it only checks every datagram (a
+# minimum size and, optionally, a fixed first byte) and applies the limits:
+# new sessions per IP, the session budget, the challenge for unknown IPs and
+# udp_flow_pps per session.
+start_port = 0
+end_port = 0
+# Every datagram has to start with this byte (0-255); -1 = any.
+first_byte = -1
+# Minimum payload size of every datagram in bytes.
+min_size = 1
+
 [limits]
 # Limits per source IP, counted within windows of window_secs seconds.
 # 0 switches a limit off.
@@ -227,6 +240,7 @@ pub struct Config {
     pub tcp_guard: TcpGuardConfig,
     pub bedrock: BedrockConfig,
     pub nethernet: NetherNetConfig,
+    pub udp_guard: UdpGuardConfig,
     pub limits: LimitsConfig,
     pub attack: AttackConfig,
     pub lists: ListsConfig,
@@ -328,6 +342,43 @@ pub struct NetherNetConfig {
     pub ice_start_port: u16,
     /// Last ICE port of the inclusive range. Maps to `ICE_END_PORT`.
     pub ice_end_port: u16,
+}
+
+/// `[udp_guard]` — generic guard for UDP services without a handshake.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UdpGuardConfig {
+    /// First port of the inclusive range, 0 = off. Maps to `UDPGUARD_START_PORT`.
+    pub start_port: u16,
+    /// Last port of the inclusive range. Maps to `UDPGUARD_END_PORT`.
+    pub end_port: u16,
+    /// Required first byte of every datagram, -1 = any. Maps to `UDPGUARD_FIRST_BYTE`.
+    pub first_byte: i32,
+    /// Minimum payload size of every datagram. Maps to `UDPGUARD_MIN_LEN`.
+    pub min_size: u32,
+}
+
+impl Default for UdpGuardConfig {
+    fn default() -> Self {
+        Self {
+            start_port: 0,
+            end_port: 0,
+            first_byte: -1,
+            min_size: 1,
+        }
+    }
+}
+
+impl UdpGuardConfig {
+    fn validate(&self) -> Result<()> {
+        if !(-1..=255).contains(&self.first_byte) {
+            bail!(
+                "[udp_guard] first_byte must be between 0 and 255, or -1 for any (got {})",
+                self.first_byte
+            );
+        }
+        check_range("[udp_guard] min_size", self.min_size as u64, 1, 1472)
+    }
 }
 
 /// `[limits]` — per source ip limits and the lifetime of verified flows.
@@ -696,19 +747,25 @@ impl Config {
             self.nethernet.ice_start_port,
             self.nethernet.ice_end_port,
         )?;
-        if java.is_none() && guard.is_none() && raknet.is_none() && ice.is_none() {
+        let udp_guard = check_ports(
+            "[udp_guard]",
+            self.udp_guard.start_port,
+            self.udp_guard.end_port,
+        )?;
+        if [java, guard, raknet, ice, udp_guard].iter().all(Option::is_none) {
             bail!("nothing to protect: every port range is switched off");
         }
         if overlap(java, guard) {
             bail!("the TCP port ranges of [java] and [tcp_guard] must not overlap");
         }
-        if overlap(raknet, ice) {
-            bail!("the UDP port ranges of [bedrock] and [nethernet] must not overlap");
+        if overlap(raknet, ice) || overlap(raknet, udp_guard) || overlap(ice, udp_guard) {
+            bail!("the UDP port ranges of [bedrock], [nethernet] and [udp_guard] must not overlap");
         }
 
         self.java.validate()?;
         self.tcp_guard.validate()?;
         self.bedrock.validate()?;
+        self.udp_guard.validate()?;
         self.limits.validate()?;
         self.attack.validate()?;
         self.lists.allow_nets().context("[lists] allow")?;
@@ -960,6 +1017,10 @@ mod tests {
             "[java]\nprotocol_min = -1",
             "[bedrock]\nraknet_protocol_min = 12",
             "[bedrock]\nopen_request_min_size = 1500",
+            "[udp_guard]\nfirst_byte = 256",
+            "[udp_guard]\nfirst_byte = -2",
+            "[udp_guard]\nmin_size = 0",
+            "[udp_guard]\nstart_port = 19132\nend_port = 19132\n[bedrock]\nstart_port = 19132\nend_port = 19132",
             "[tcp_guard]\nstart_port = 443\nend_port = 443\nallow_tls = false\nallow_http = false",
             "[xdp]\nadopt_secs = 3601",
             "[xdp]\nstate_dir = \"\"",

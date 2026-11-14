@@ -29,6 +29,8 @@ static volatile __u32 RAKNET_PROTO_MAX = 11;
 static volatile __u32 RAKNET_OCR1_MIN = 400;
 static volatile __u8 GUARD_TLS = 1;
 static volatile __u8 GUARD_HTTP = 1;
+static volatile __u32 UDPGUARD_FIRST_BYTE = 0xFF;
+static volatile __u32 UDPGUARD_MIN_LEN = 17;
 
 #include "../common.h"
 #include "../varint.h"
@@ -1045,6 +1047,23 @@ static void test_guard_data(void)
     GUARD_TLS = 1;
 }
 
+static void test_udp_guard(void)
+{
+    CHECK(udp_guard_valid(0xFF, 17) == 1);
+    CHECK(udp_guard_valid(0xFF, 1400) == 1);
+    CHECK(udp_guard_valid(0xFF, 16) == 0);
+    CHECK(udp_guard_valid(0xFE, 17) == 0);
+    CHECK(udp_guard_valid(0x00, 17) == 0);
+
+    UDPGUARD_FIRST_BYTE = UDPGUARD_ANY_BYTE;
+    CHECK(udp_guard_valid(0x00, 17) == 1);
+    CHECK(udp_guard_valid(0x00, 16) == 0);
+    UDPGUARD_MIN_LEN = 0;
+    CHECK(udp_guard_valid(0x42, 1) == 1);
+    UDPGUARD_FIRST_BYTE = 0xFF;
+    UDPGUARD_MIN_LEN = 17;
+}
+
 /* ------------------------------------------------------------------------
  * Retransmit challenge table
  * --------------------------------------------------------------------- */
@@ -1144,6 +1163,7 @@ int main(void)
     test_raknet_open_connection();
     test_stun_binding();
     test_guard_data();
+    test_udp_guard();
     test_retry_table();
 
     printf("%u checks, %u failures\n", checks_run, checks_failed);

@@ -13,6 +13,7 @@
  *   RakNet   OpenConnectionRequest1, then OpenConnectionRequest2 from the
  *            same address. Unconnected pings are answered but rate limited.
  *   ICE      A STUN binding request, then only STUN and DTLS.
+ *   UDP guard  Nothing but a first byte and a minimum size (voice chat).
  *
  * Verified flows skip inspection and pay for a single map lookup. All other
  * traffic is dropped at the driver level, before the kernel spends anything
@@ -222,6 +223,7 @@ enum port_class
     PORT_GUARD,
     PORT_RAKNET,
     PORT_ICE,
+    PORT_UDP_GUARD,
 };
 
 static __always_inline __u8 port_in_range(const __u32 port, const __u32 start, const __u32 end)
@@ -251,6 +253,10 @@ static __always_inline __u32 udp_port_class(const __u32 port)
     if (port_in_range(port, ICE_START_PORT, ICE_END_PORT))
     {
         return PORT_ICE;
+    }
+    if (port_in_range(port, UDPGUARD_START_PORT, UDPGUARD_END_PORT))
+    {
+        return PORT_UDP_GUARD;
     }
     return PORT_UNPROTECTED;
 }
@@ -918,8 +924,10 @@ static __always_inline void count_udp_refusal(const struct packet *p, const __u3
     }
 }
 
-static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *udp, const __u8 ice)
+static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *udp, const __u32 class)
 {
+    const __u8 ice = class == PORT_ICE;
+    const __u8 guard = class == PORT_UDP_GUARD;
     const __u32 udp_len = bpf_ntohs(udp->len);
     const __u8 *payload = (const __u8 *)(udp + 1);
     if (udp_len <= sizeof(struct udphdr))
@@ -936,6 +944,13 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
     }
     const __u8 first = payload[0];
 
+    // the generic guard has one rule for every datagram, session or not
+    if (guard && !udp_guard_valid(first, (__u64)(payload_end - payload)))
+    {
+        count_stat(p->stats, STAT_UDPGUARD_INVALID, 1);
+        goto drop;
+    }
+
     // verified sessions only pay for this lookup
     struct flow_entry *session = bpf_map_lookup_elem(&verified_udp, &p->flow);
     if (session)
@@ -950,6 +965,10 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
         {
             bpf_map_delete_elem(&verified_udp, &p->flow);
             session = NULL;
+        }
+        else if (guard)
+        {
+            return XDP_PASS;
         }
         else if (ice)
         {
@@ -975,6 +994,25 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
     }
     if (listed == LIST_ALLOWED)
     {
+        return XDP_PASS;
+    }
+
+    if (guard)
+    {
+        // there is no handshake to follow: the first acceptable datagram
+        // opens the session. Such services keep sending from the same
+        // socket, so any later datagram serves as the retransmit
+        const __u32 admitted = admit(p, OPEN_UDP, UDP_OPEN_HITS, UDP_OPEN_BUDGET, 1, 0);
+        if (admitted != ADMIT_OK)
+        {
+            count_udp_refusal(p, admitted, STAT_UDP_OPEN_THROTTLED);
+            goto drop;
+        }
+        if (!verify_flow(p, &verified_udp, FLOW_UDP_GUARD))
+        {
+            goto drop;
+        }
+        count_stat(p->stats, STAT_UDPGUARD_VERIFIED, 1);
         return XDP_PASS;
     }
 
@@ -1321,7 +1359,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
 
     if (l4_proto == IPPROTO_UDP)
     {
-        return handle_udp(&p, udp, class == PORT_ICE);
+        return handle_udp(&p, udp, class);
     }
 
     const struct tcphdr *tcp = l4;

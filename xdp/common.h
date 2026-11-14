@@ -143,6 +143,7 @@ enum flow_kind
     FLOW_RAKNET = 3,  // RakNet session that passed OpenConnectionRequest 1 + 2
     FLOW_ICE = 4,     // WebRTC session opened by a STUN binding request
     FLOW_ADOPTED = 5, // existed before the filter was attached
+    FLOW_UDP_GUARD = 6, // generic UDP guard session
 };
 
 /*

@@ -410,6 +410,15 @@
             "type": "prometheus",
             "uid": "${datasource}"
           }
+        },
+        {
+          "refId": "T22",
+          "expr": "sum(rate(minecraft_udp_guard_invalid{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "invalid udp guard",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
         }
       ]
     },
@@ -505,6 +514,15 @@
           "refId": "F",
           "expr": "sum(rate(minecraft_guard_verified{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "guard connections",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "T6",
+          "expr": "sum(rate(minecraft_udp_guard_verified{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "udp guard sessions",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

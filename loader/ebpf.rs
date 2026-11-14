@@ -307,6 +307,12 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
     let ice_start_port = u32::from(config.nethernet.ice_start_port);
     let ice_end_port = u32::from(config.nethernet.ice_end_port);
 
+    let udpguard_start_port = u32::from(config.udp_guard.start_port);
+    let udpguard_end_port = u32::from(config.udp_guard.end_port);
+    // 256 (UDPGUARD_ANY_BYTE in xdp/bedrock.h) = any first byte
+    let udpguard_first_byte = u32::try_from(config.udp_guard.first_byte).unwrap_or(256);
+    let udpguard_min_len = config.udp_guard.min_size;
+
     let udp_open_hits = limits.udp_sessions_per_ip;
     let udp_open_budget = per_cpu(attack.udp_session_budget, cpus);
     let udp_flow_pps = limits.udp_flow_pps;
@@ -374,6 +380,10 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
         .override_global("PING_BUDGET", &ping_budget, true)
         .override_global("ICE_START_PORT", &ice_start_port, true)
         .override_global("ICE_END_PORT", &ice_end_port, true)
+        .override_global("UDPGUARD_START_PORT", &udpguard_start_port, true)
+        .override_global("UDPGUARD_END_PORT", &udpguard_end_port, true)
+        .override_global("UDPGUARD_FIRST_BYTE", &udpguard_first_byte, true)
+        .override_global("UDPGUARD_MIN_LEN", &udpguard_min_len, true)
         .override_global("UDP_OPEN_HITS", &udp_open_hits, true)
         .override_global("UDP_OPEN_BUDGET", &udp_open_budget, true)
         .override_global("UDP_FLOW_PPS", &udp_flow_pps, true)
@@ -575,6 +585,13 @@ fn log_protection(config: &Config, cpus: u32, adopt_mode: u8) {
         info!(
             "NetherNet ICE: udp {}",
             ports(nethernet.ice_start_port, nethernet.ice_end_port)
+        );
+    }
+    let udp_guard = &config.udp_guard;
+    if udp_guard.start_port != 0 {
+        info!(
+            "UDP guard: udp {}",
+            ports(udp_guard.start_port, udp_guard.end_port)
         );
     }
     let attack = &config.attack;

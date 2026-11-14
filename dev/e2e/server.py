@@ -7,6 +7,7 @@
   tcp 8080   plain echo, not protected by the filter
   udp 19132  RakNet: pong, OpenConnectionReply 1 and 2, ACK for frame sets
   udp 27020  echo (NetherNet ICE stand-in)
+  udp 24454  echo (voice chat stand-in)
 
 Every TCP connection that delivers data is appended to the file given as
 first argument, so the test can tell what got through the filter.
@@ -160,6 +161,7 @@ for target, args in [
     (tcp_server, (8080, echo_client)),
     (raknet_server, (19132,)),
     (udp_echo, (27020,)),
+    (udp_echo, (24454,)),
 ]:
     threading.Thread(target=target, args=args, daemon=True).start()
 

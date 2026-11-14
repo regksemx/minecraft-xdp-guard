@@ -14,6 +14,7 @@ an attack mode built for small machines.
 | Bedrock (RakNet) | UDP | OpenConnectionRequest 1 and 2 from the same address |
 | NetherNet data channels | UDP | STUN binding request first, then only STUN and DTLS |
 | Generic TCP guard (NetherNet signaling) | TCP | TCP handshake, then a TLS ClientHello or an HTTP request |
+| Generic UDP guard (voice chat) | UDP | nothing: every datagram needs a minimum size and optionally a fixed first byte, the limits do the rest |
 
 Everything else aimed at a protected port is dropped. IPv4 only; IPv6 to the
 protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
@@ -139,6 +140,17 @@ A port range with `start_port = 0` switches that protection off.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `ice_start_port`, `ice_end_port` | 0 | Inclusive port range of the ICE candidates. |
+
+**`[udp_guard]`** — other UDP services, e.g. a voice chat
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `start_port`, `end_port` | 0 | Inclusive port range. |
+| `first_byte` | -1 | Every datagram has to start with this byte (0-255), -1 = any. |
+| `min_size` | 1 | Minimum payload size of every datagram. |
+
+New sessions count against `udp_sessions_per_ip` and `udp_session_budget`,
+unknown IPs are challenged, and `udp_flow_pps` caps each session.
 
 **`[limits]`** — per source IP, within windows of `window_secs`
 

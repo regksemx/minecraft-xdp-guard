@@ -33,6 +33,12 @@ end_port = 19132
 ice_start_port = 27020
 ice_end_port = 27029
 
+[udp_guard]
+start_port = 24454
+end_port = 24454
+first_byte = 255
+min_size = 17
+
 [limits]
 window_secs = 2
 syn_per_ip = {syn_per_ip}
@@ -118,6 +124,13 @@ def main():
     client.expect(f"ice_dtls {ice}", "ok")
     client.expect("ice_stray", "timeout")
 
+    # voice chat stand-in behind the generic UDP guard
+    voice_packet = "ff" + "11" * 30
+    voice = client.expect(f"voice {voice_packet}", "ok")
+    client.expect(f"voice {voice_packet} {voice}", "ok")
+    client.expect(f"voice 0102030405060708090a0b0c0d0e0f101112 {voice}", "timeout")   # wrong first byte
+    client.expect("voice ff0102", "timeout")                                           # too short
+
     # unprotected ports are none of the filter's business
     client.expect("tcp_raw 8080 00", "reply")
 
@@ -126,6 +139,8 @@ def main():
     check("metrics: raknet sessions", loader.metric("minecraft_raknet_verified") == 1)
     check("metrics: ice sessions", loader.metric("minecraft_ice_verified") == 1)
     check("metrics: guard connections", loader.metric("minecraft_guard_verified") == 1)
+    check("metrics: udp guard sessions", loader.metric("minecraft_udp_guard_verified") == 1)
+    check("metrics: udp guard invalid", loader.metric("minecraft_udp_guard_invalid") == 2)
     check("metrics: bad hosts", loader.metric("minecraft_bad_host") == 2)
     check("metrics: status throttled", loader.metric("minecraft_status_throttled") == 1)
     check("metrics: dropped packets", loader.metric("minecraft_dropped_packets") > 10)

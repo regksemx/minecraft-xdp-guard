@@ -33,6 +33,15 @@ end_port = 19132
 ice_start_port = 27020
 ice_end_port = 27029
 
+# Voice chat. By its sources every Simple Voice Chat datagram starts with
+# 0xFF followed by the 16 byte player UUID; check with
+# `tcpdump -c 20 -X udp port 24454` before relying on first_byte.
+# [udp_guard]
+# start_port = 24454
+# end_port = 24454
+# first_byte = 255
+# min_size = 17
+
 [limits]
 window_secs = 3
 syn_per_ip = 10
