@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+"""End-to-end test: the real loader with the real XDP program between a
+client and stand-in servers.
+
+Two network namespaces are joined by a veth pair; the loader attaches to the
+server end in generic (skb) mode. A client process in the other namespace
+then plays good and bad clients, and the loader is restarted in between to
+check what happens to established connections.
+
+Run as root on Linux (dev/run.sh dev/e2e-test.sh does it in a container).
+"""
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOADER = os.path.abspath(sys.argv[1])
+SRV, CLI = "mcxdp-srv", "mcxdp-cli"
+STATE_DIR = "/sys/fs/bpf/mcxdp-e2e"
+
+failures = 0
+checks = 0
+
+
+def sh(command, check=True):
+    return subprocess.run(command, shell=True, check=check, capture_output=True, text=True)
+
+
+def in_ns(ns, argv, **kwargs):
+    # nsenter instead of `ip netns exec`: the latter gives the process its
+    # own /sys without the bpf filesystem the loader pins its maps in
+    return subprocess.Popen(["nsenter", f"--net=/run/netns/{ns}"] + argv, text=True, **kwargs)
+
+
+def check(what, condition, detail=""):
+    global checks, failures
+    checks += 1
+    if not condition:
+        failures += 1
+        print(f"FAIL: {what} {detail}", flush=True)
+
+
+CONFIG = """
+[java]
+start_port = 25565
+end_port = 25565
+hosts = ["mc.e2e.test", "10.99.0.1"]
+
+[tcp_guard]
+start_port = 19132
+end_port = 19132
+
+[bedrock]
+start_port = 19132
+end_port = 19132
+
+[nethernet]
+ice_start_port = 27020
+ice_end_port = 27029
+
+[limits]
+window_secs = 2
+syn_per_ip = {syn_per_ip}
+status_per_ip = 3
+
+[attack]
+challenge = "{challenge}"
+good_after_secs = 0
+
+[lists]
+allow = {allow}
+deny = {deny}
+
+[xdp]
+mode = "skb"
+drop_ipv6 = true
+keep_state = true
+state_dir = "{state_dir}"
+adopt = "{adopt}"
+adopt_secs = 20
+
+[metrics]
+enabled = true
+addr = "127.0.0.1:1999"
+poll_secs = 1
+
+[logging]
+level = "info"
+"""
+
+
+class Loader:
+    def __init__(self, workdir):
+        self.workdir = workdir
+        self.process = None
+
+    def start(self, reset=False, challenge="auto", adopt="off", syn_per_ip=100, allow=(), deny=()):
+        config = os.path.join(self.workdir, "config.toml")
+        with open(config, "w") as f:
+            f.write(CONFIG.format(challenge=challenge, adopt=adopt, syn_per_ip=syn_per_ip, state_dir=STATE_DIR,
+                                  allow=list(allow), deny=list(deny)))
+        argv = [LOADER, "-c", config, "veth-srv"] + (["--reset-state"] if reset else [])
+        self.process = in_ns(SRV, argv, cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        lines = []
+        for line in self.process.stdout:
+            lines.append(line)
+            if "BPF program attached" in line:
+                # keep draining so the loader never blocks on a full pipe
+                subprocess.Popen(["cat"], stdin=self.process.stdout, stdout=subprocess.DEVNULL)
+                return "".join(lines)
+        raise SystemExit("the loader did not attach:\n" + "".join(lines))
+
+    def stop(self):
+        self.process.terminate()
+        check("loader exits cleanly", self.process.wait(timeout=10) == 0)
+
+    def metric(self, name):
+        code = (
+            "import urllib.request,sys;"
+            "sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:1999/metrics', timeout=3).read().decode())"
+        )
+        text = in_ns(SRV, [sys.executable, "-c", code], stdout=subprocess.PIPE).communicate()[0]
+        for line in text.splitlines():
+            if line.startswith(name + " "):
+                return int(float(line.split()[1]))
+        return -1
+
+
+class Client:
+    def __init__(self):
+        self.process = in_ns(CLI, [sys.executable, os.path.join(HERE, "client.py")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+
+    def ask(self, command):
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+        return self.process.stdout.readline().strip()
+
+    def expect(self, command, expected):
+        answer = self.ask(command)
+        check(command, answer.split()[0] == expected if answer else False, f"-> '{answer}', expected '{expected}'")
+        return answer.split()[1] if answer.startswith("ok ") else None
+
+
+def setup():
+    sh("mount -t bpf bpf /sys/fs/bpf", check=False)
+    for ns in (SRV, CLI):
+        sh(f"ip netns del {ns}", check=False)
+        sh(f"ip netns add {ns}")
+    sh(f"ip link add veth-srv netns {SRV} type veth peer name veth-cli netns {CLI}")
+    sh(f"ip -n {SRV} addr add 10.99.0.1/24 dev veth-srv")
+    sh(f"ip -n {CLI} addr add 10.99.0.2/24 dev veth-cli")
+    for ns, dev in ((SRV, "veth-srv"), (CLI, "veth-cli")):
+        sh(f"ip -n {ns} link set lo up")
+        sh(f"ip -n {ns} link set {dev} up")
+    sh(f"rm -rf {STATE_DIR}", check=False)
+
+
+def teardown():
+    for ns in (SRV, CLI):
+        sh(f"ip netns del {ns}", check=False)
+    sh(f"rm -rf {STATE_DIR}", check=False)
+
+
+def main():
+    setup()
+    workdir = tempfile.mkdtemp(prefix="mcxdp-e2e-")
+    events_path = os.path.join(workdir, "events.log")
+    open(events_path, "w").close()
+    server = in_ns(SRV, [sys.executable, os.path.join(HERE, "server.py"), events_path], stdout=subprocess.PIPE)
+    assert server.stdout.readline().strip() == "ready"
+    client = Client()
+    loader = Loader(workdir)
+
+    def events():
+        with open(events_path) as f:
+            return f.read().splitlines()
+
+    # ---- without the filter everything reaches the servers -----------------
+    client.expect("tcp_raw 8080 00", "reply")
+    client.expect("rak_stray", "ok")
+    check("servers reachable before the filter is attached", len(events()) == 1)
+
+    # ---- phase 1: fresh filter -------------------------------------------
+    print(loader.start(), end="", flush=True)
+
+    # Java
+    client.expect("java_status mc.e2e.test", "ok")
+    java = client.expect("java_login Steve mc.e2e.test", "ok")
+    client.expect(f"echo {java}", "ok")
+    java_split = client.expect("java_login Alex MC.E2E.Test. 1", "ok")
+    client.expect(f"echo {java_split}", "ok")
+    client.expect("java_login Bot evil.example.com", "timeout")       # host not allowed
+    client.expect("java_status 203.0.113.9", "timeout")
+    client.expect("java_login ThisNameIsWayTooLongForMojang mc.e2e.test", "timeout")
+    client.expect("tcp_raw 25565 474554202f20485454502f312e310d0a0d0a", "timeout")  # "GET / HTTP/1.1"
+    client.expect("tcp_raw 25565 fe01", "timeout")                     # legacy ping
+    logins = [e for e in events() if e.startswith("java")]
+    check("only valid Java clients reached the server",
+          logins == ["java status mc.e2e.test", "java login mc.e2e.test Steve", "java login MC.E2E.Test. Alex"],
+          str(logins))
+
+    # status limit: 3 per ip within a window of 2s
+    time.sleep(2.1)
+    for _ in range(3):
+        client.expect("java_status mc.e2e.test", "ok")
+    client.expect("java_status mc.e2e.test", "timeout")
+
+    # NetherNet signaling stand-in on the guard port
+    client.expect("http 19132", "ok")
+    client.expect("tcp_raw 19132 5353482d322e302d4f70656e5353480d0a", "timeout")   # "SSH-2.0-OpenSSH"
+    check("only HTTP reached the guarded port", [e for e in events() if e.startswith("http")] == ["http GET"])
+
+    # Bedrock
+    client.expect("rak_ping", "ok")
+    raknet = client.expect("rak_connect", "ok")
+    client.expect(f"rak_data {raknet}", "ok")
+    client.expect("rak_stray", "timeout")                              # game traffic without a session
+
+    # NetherNet ICE
+    ice = client.expect("ice_open", "ok")
+    client.expect(f"ice_dtls {ice}", "ok")
+    client.expect("ice_stray", "timeout")
+
+    # unprotected ports are none of the filter's business
+    client.expect("tcp_raw 8080 00", "reply")
+
+    time.sleep(1.5)  # one metrics poll
+    check("metrics: verified logins", loader.metric("minecraft_verified_connections") == 2)
+    check("metrics: raknet sessions", loader.metric("minecraft_raknet_verified") == 1)
+    check("metrics: ice sessions", loader.metric("minecraft_ice_verified") == 1)
+    check("metrics: guard connections", loader.metric("minecraft_guard_verified") == 1)
+    check("metrics: bad hosts", loader.metric("minecraft_bad_host") == 2)
+    check("metrics: status throttled", loader.metric("minecraft_status_throttled") == 1)
+    check("metrics: dropped packets", loader.metric("minecraft_dropped_packets") > 10)
+
+    # ---- phase 2: restart, state is kept (adoption is off) ---------------
+    loader.stop()
+    client.expect(f"echo {java}", "ok")                                # no filter in between
+    output = loader.start()
+    check("pinned maps are reused", output.count("Reusing pinned map") == 3, output)
+    client.expect(f"echo {java}", "ok")
+    client.expect(f"echo {java_split}", "ok")
+    client.expect(f"rak_data {raknet}", "ok")
+    client.expect(f"ice_dtls {ice}", "ok")
+    client.expect("rak_stray", "timeout")
+    time.sleep(1.5)
+    check("nothing had to be adopted", loader.metric("minecraft_tcp_adopted") == 0)
+
+    # ---- phase 3: state lost, existing connections are adopted -----------
+    loader.stop()
+    output = loader.start(reset=True, adopt="socket")
+    check("state was reset", output.count("Removed pinned map") == 3 and "Reusing" not in output, output)
+    client.expect(f"echo {java}", "ok")
+    client.expect(f"rak_data {raknet}", "ok")
+    client.expect(f"ice_dtls {ice}", "ok")
+    # the kernel has no such connection: not adopted
+    client.expect("tcp_raw 25565 fe01", "timeout")
+    time.sleep(1.5)
+    check("metrics: tcp adopted", loader.metric("minecraft_tcp_adopted") == 1)
+    check("metrics: udp adopted", loader.metric("minecraft_udp_adopted") == 2)
+
+    # ---- phase 4: state lost, no adoption, challenge always on -----------
+    loader.stop()
+    loader.start(reset=True, adopt="off", challenge="always", syn_per_ip=6)
+    client.expect(f"echo {java}", "timeout")
+    client.expect(f"rak_data {raknet}", "timeout")
+    client.expect(f"ice_dtls {ice}", "timeout")
+
+    # an unknown ip gets in with its SYN retransmit (after 1s) ...
+    answer = client.ask("connect_time 25565")
+    check("first connect of an unknown ip is delayed by the challenge",
+          answer.startswith("ok") and 0.9 <= float(answer.split()[1]) <= 2.5, answer)
+    # ... and is known afterwards
+    answer = client.ask("connect_time 25565")
+    check("known ip connects immediately", answer.startswith("ok") and float(answer.split()[1]) < 0.2, answer)
+    client.expect("java_login Steve mc.e2e.test", "ok")
+
+    # per ip SYN limit: 6 per 2s window (the kernel retries dropped SYNs
+    # only after 1s, longer than the client waits)
+    time.sleep(2.1)
+    answer = client.ask("syn_burst 25565 12")
+    check("syn limit", answer == "ok 6", answer)
+    time.sleep(1.5)
+    check("metrics: syn throttled", loader.metric("minecraft_syn_throttled") >= 6)
+    check("metrics: challenge", loader.metric("minecraft_challenge_passed") == 1)
+
+    # ---- phase 5: deny and allow lists ------------------------------------
+    loader.stop()
+    loader.start(reset=True, deny=["10.99.0.0/24", "203.0.113.7"])
+    client.expect("java_status mc.e2e.test", "timeout")
+    client.expect("rak_ping", "timeout")
+    client.expect("tcp_raw 8080 00", "reply")                          # only the protected ports
+    time.sleep(1.5)
+    check("metrics: deny list", loader.metric("minecraft_denylist_dropped") >= 2)
+
+    loader.stop()
+    loader.start(reset=True, deny=["10.99.1.0/24"], allow=["10.99.0.2"])
+    client.expect("java_status mc.e2e.test", "ok")
+    # allowed ips are not inspected: what was dropped in phase 1 gets through
+    client.expect("tcp_raw 19132 5353482d322e302d4f70656e5353480d0a", "reply")
+    client.expect("rak_stray", "ok")
+    time.sleep(1.5)
+    check("metrics: allow list", loader.metric("minecraft_allowlist_passed") > 5)
+    check("metrics: nothing dropped", loader.metric("minecraft_dropped_packets") == 0)
+
+    loader.stop()
+    check("state is kept after exit", sorted(os.listdir(os.path.join(STATE_DIR, "v1"))) ==
+          ["ip_table", "verified_tcp", "verified_udp"])
+
+    client.process.stdin.close()
+    server.kill()
+    teardown()
+    print(f"{checks} checks, {failures} failed", flush=True)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    finally:
+        teardown()
