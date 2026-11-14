@@ -13,7 +13,7 @@ import os
 import sys
 import time
 
-from harness import STATE_DIR, Client, Loader, check, setup, summary, teardown
+from harness import CLIENT_IP6, SERVER_IP6, STATE_DIR, Client, Loader, check, setup, summary, teardown
 
 CONFIG = """
 [java]
@@ -56,7 +56,7 @@ deny = {deny}
 
 [xdp]
 mode = "skb"
-drop_ipv6 = true
+ipv6 = "{ipv6}"
 keep_state = true
 state_dir = "{state_dir}"
 adopt = "{adopt}"
@@ -72,7 +72,8 @@ level = "info"
 """
 
 
-DEFAULTS = {"challenge": "auto", "adopt": "off", "syn_per_ip": 100, "allow": [], "deny": [], "pong_from": ""}
+DEFAULTS = {"challenge": "auto", "adopt": "off", "syn_per_ip": 100, "allow": [], "deny": [], "pong_from": "",
+            "ipv6": "drop"}
 
 
 def main():
@@ -151,7 +152,7 @@ def main():
     loader.stop()
     client.expect(f"echo {java}", "ok")                                # no filter in between
     output = loader.start(**DEFAULTS)
-    check("pinned maps are reused", output.count("Reusing pinned map") == 6, output)
+    check("pinned maps are reused", output.count("Reusing pinned map") == 7, output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"echo {java_split}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
@@ -164,7 +165,7 @@ def main():
     loader.stop()
     output = loader.start(reset=True, **{**DEFAULTS, "adopt": "socket"})
     # connections and known ips are forgotten, the deny list is not
-    check("state was reset", output.count("Removed pinned map") == 5 and output.count("Reusing pinned map") == 1,
+    check("state was reset", output.count("Removed pinned map") == 5 and output.count("Reusing pinned map") == 2,
           output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
@@ -339,12 +340,75 @@ def main():
     check("the filter is gone", Loader.detached())
     client.expect("rak_stray", "ok")
 
+    # ---- phase 8: IPv6 ---------------------------------------------------
+    client6 = Client(CLIENT_IP6, SERVER_IP6)
+    client6.expect("rak_stray", "ok")                                  # no filter right now
+
+    # "drop": nothing for a protected port gets through over IPv6
     loader.start(**DEFAULTS)
+    client6.expect("java_status mc.e2e.test", "timeout")
+    client6.expect("rak_ping", "timeout")
+    client6.expect("tcp_raw 8080 00", "reply")                         # only the protected ports
+    client.expect("rak_ping", "ok")                                    # IPv4 as usual
+    loader.stop()
+
+    # "inspect": the same rules as for IPv4
+    loader.start(**{**DEFAULTS, "ipv6": "inspect", "pong_from": "127.0.0.1:19132"})
+    client6.expect("java_status mc.e2e.test", "ok")
+    java6 = client6.expect("java_login Steve6 mc.e2e.test", "ok")
+    client6.expect(f"echo {java6}", "ok")
+    client6.expect("java_login Bot evil.example.com", "timeout")
+    client6.expect("tcp_raw 25565 fe01", "timeout")
+    client6.expect("http 19132", "ok")
+    client6.expect("tcp_raw 19132 5353482d322e302d4f70656e5353480d0a", "timeout")
+    client6.expect("rak_ping", "ok")                                   # answered by the server, not the cache
+    raknet6 = client6.expect("rak_connect", "ok")
+    client6.expect(f"rak_data {raknet6}", "ok")
+    client6.expect("rak_stray", "timeout")
+    ice6 = client6.expect("ice_open", "ok")
+    client6.expect(f"ice_dtls {ice6}", "ok")
+    client6.expect("ice_stray", "timeout")
+    client6.expect(f"voice {voice_packet}", "ok")
+    client6.expect("voice ff0102", "timeout")
+    check("IPv6 logins reached the server", "java login mc.e2e.test Steve6" in events())
+    check("the IPv6 ping was answered by the server", f"raknet ping {CLIENT_IP6}" in events())
+    time.sleep(1.5)
+    check("metrics: pongs from the filter", loader.metric("minecraft_raknet_pongs") == 0)
+
+    # replacing the loader keeps IPv6 connections as well
+    loader.hand_over()
+    loader.start(**{**DEFAULTS, "ipv6": "inspect"})
+    client6.expect(f"echo {java6}", "ok")
+    client6.expect(f"rak_data {raknet6}", "ok")
+    client6.expect("rak_stray", "timeout")
+
+    # banning an IPv6 network: new packets at once, open connections within a second
+    loader.deny("add", "--ttl", "60", "fd99::/64")
+    client6.expect("rak_ping", "timeout")
+    time.sleep(1.2)
+    client6.expect(f"echo {java6}", "timeout")
+    client6.expect(f"rak_data {raknet6}", "timeout")
+    client.expect("rak_ping", "ok")                                    # IPv4 is not affected
+    output = loader.deny("list")
+    check("the IPv6 ban is listed", "fd99::/64" in output and "s left" in output, output)
+    check("del removes the IPv6 ban", "removed 1" in loader.deny("del", "fd99::/64"))
+    client6.expect("rak_ping", "ok")
+
+    # allow and deny entries from the config file
+    loader.stop()
+    loader.start(**{**DEFAULTS, "ipv6": "inspect", "deny": ["fd99::2"]})
+    client6.expect("rak_ping", "timeout")
+    loader.stop()
+    loader.start(**{**DEFAULTS, "ipv6": "inspect", "allow": ["fd99::/64", "192.0.2.0/24"]})
+    client6.expect("rak_stray", "ok")                                  # not inspected at all
+    client.expect("rak_stray", "timeout")
+
     loader.stop()
     check("stop detaches the filter", Loader.detached())
     check("state is kept after exit", sorted(os.listdir(os.path.join(STATE_DIR, "v1"))) ==
-          ["deny_v4", "ip_table", "pending_tcp", "pending_udp", "verified_tcp", "verified_udp"])
+          ["deny_v4", "deny_v6", "ip_table", "pending_tcp", "pending_udp", "verified_tcp", "verified_udp"])
     prober.close()
+    client6.close()
 
     client.close()
     server.kill()

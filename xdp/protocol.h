@@ -33,6 +33,10 @@
 #define HANDSHAKE_HOST_DATA_MIN (0)
 #define HANDSHAKE_HOST_DATA_MAX (255 * UTF8_MAX_BYTES)
 
+// all-ones masks covering the maximum lengths, for SKIP_CHECKED_OR_RETURN
+#define HANDSHAKE_HOST_SKIP_MASK 0x3FF
+_Static_assert(HANDSHAKE_HOST_DATA_MAX <= HANDSHAKE_HOST_SKIP_MASK, "host skip mask too small!");
+
 #define HANDSHAKE_PORT_LEN (2)
 
 #define HANDSHAKE_INTENTION_MIN MIN_VARINT_BYTES
@@ -56,6 +60,13 @@
 
 #define LOGIN_PUBLIC_KEY_MIN (/*has key*/ 1)
 #define LOGIN_PUBLIC_KEY_MAX (/*has key*/ 1 + /*expiry*/ 8 + /*length*/ MAX_VARINT_BYTES + LOGIN_KEY_MAX + /*length*/ MAX_VARINT_BYTES + LOGIN_SIGNATURE_MAX)
+
+#define LOGIN_NAME_SKIP_MASK 0x3F
+#define LOGIN_KEY_SKIP_MASK 0x3FF
+#define LOGIN_SIGNATURE_SKIP_MASK 0x1FFF
+_Static_assert(LOGIN_NAME_DATA_MAX <= LOGIN_NAME_SKIP_MASK, "name skip mask too small!");
+_Static_assert(LOGIN_KEY_MAX <= LOGIN_KEY_SKIP_MASK, "key skip mask too small!");
+_Static_assert(LOGIN_SIGNATURE_MAX <= LOGIN_SIGNATURE_SKIP_MASK, "signature skip mask too small!");
 
 #define LOGIN_HAS_UUID_LEN 1
 #define LOGIN_DATA_MIN (LOGIN_NAME_LEN_MIN + LOGIN_NAME_DATA_MIN)
@@ -163,14 +174,12 @@ static __always_inline __s32 inspect_handshake(const __u8 *cursor, const __u8 *p
 
     // host length, then skip the host data
     READ_VARINT_OR_RETURN(varint, cursor, payload_end, data_end, VARINT_SIZE(HANDSHAKE_HOST_DATA_MAX));
-    // the barrier pins the length to one register, so the verifier applies
-    // the range check below to the very value that is added to the cursor
-    __u32 host_len = (__u32)varint.value;
-    barrier_var(host_len);
-    ASSERT_OR_RETURN(host_len <= HANDSHAKE_HOST_DATA_MAX);
+    ASSERT_IN_RANGE_OR_RETURN(varint.value, HANDSHAKE_HOST_DATA_MIN, HANDSHAKE_HOST_DATA_MAX);
+    const __u32 host_len = (__u32)varint.value;
     *host = cursor;
     *host_len_out = host_len;
-    SKIP_OR_RETURN(cursor, host_len, payload_end, data_end);
+
+    SKIP_CHECKED_OR_RETURN(cursor, host_len, HANDSHAKE_HOST_SKIP_MASK, payload_end, data_end);
 
     // server port
     SKIP_OR_RETURN(cursor, HANDSHAKE_PORT_LEN, payload_end, data_end);
@@ -257,7 +266,7 @@ static __always_inline __u8 inspect_login_packet(const __u8 *cursor, const __u8 
     // username length, then skip the username data
     READ_VARINT_OR_RETURN(varint, cursor, payload_end, data_end, VARINT_SIZE(ONLINE_NAMES ? 16 : LOGIN_NAME_DATA_MAX));
     ASSERT_IN_RANGE_OR_RETURN(varint.value, LOGIN_NAME_DATA_MIN, ONLINE_NAMES ? 16 : LOGIN_NAME_DATA_MAX);
-    SKIP_OR_RETURN(cursor, varint.value, payload_end, data_end);
+    SKIP_CHECKED_OR_RETURN(cursor, varint.value, LOGIN_NAME_SKIP_MASK, payload_end, data_end);
 
     // optional chat signing key, 1.19 (759) up to 1.19.3 (761)
     if (protocol_version >= 759 && protocol_version < 761)
@@ -272,12 +281,12 @@ static __always_inline __u8 inspect_login_packet(const __u8 *cursor, const __u8 
             // public key length, then skip the key
             READ_VARINT_OR_RETURN(varint, cursor, payload_end, data_end, VARINT_SIZE(LOGIN_KEY_MAX));
             ASSERT_IN_RANGE_OR_RETURN(varint.value, LOGIN_KEY_MIN, LOGIN_KEY_MAX);
-            SKIP_OR_RETURN(cursor, varint.value, payload_end, data_end);
+            SKIP_CHECKED_OR_RETURN(cursor, varint.value, LOGIN_KEY_SKIP_MASK, payload_end, data_end);
 
             // signature length, then skip the signature
             READ_VARINT_OR_RETURN(varint, cursor, payload_end, data_end, VARINT_SIZE(LOGIN_SIGNATURE_MAX));
             ASSERT_IN_RANGE_OR_RETURN(varint.value, LOGIN_SIGNATURE_MIN, LOGIN_SIGNATURE_MAX);
-            SKIP_OR_RETURN(cursor, varint.value, payload_end, data_end);
+            SKIP_CHECKED_OR_RETURN(cursor, varint.value, LOGIN_SIGNATURE_SKIP_MASK, payload_end, data_end);
         }
     }
 

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use crate::hosts;
@@ -157,7 +157,7 @@ good_after_secs = 180
 good_ttl_hours = 72
 
 [lists]
-# IPv4 addresses or networks ("203.0.113.7", "198.51.100.0/24").
+# Addresses or networks ("203.0.113.7", "198.51.100.0/24", "2001:db8::/48").
 # allow: never inspected or limited on the protected ports (monitoring,
 #        your own proxies). deny: always dropped on the protected ports.
 # Bans can also be added while the filter runs, see `xdp-loader deny --help`.
@@ -174,10 +174,14 @@ deny = []
 #             slower; use it when the driver misbehaves in native mode.
 mode = "auto"
 
-# The filter only inspects IPv4. Set this to true if the protected services
-# are reachable over IPv6 as well: IPv6 packets to the protected ports are
-# dropped then, instead of bypassing the filter.
-drop_ipv6 = false
+# What happens to IPv6 packets for the protected ports.
+# "pass"    -> the filter ignores IPv6. Only safe if the protected services
+#              are not reachable over IPv6, otherwise it is a way around.
+# "drop"    -> they are dropped.
+# "inspect" -> they are inspected and limited exactly like IPv4. The limits
+#              per IP count per /64 network. Bedrock pings over IPv6 are
+#              always answered by the server (see pong_from).
+ipv6 = "pass"
 
 # The tables of verified connections, known IPs and bans are pinned in
 # state_dir while the loader runs. With keep_state they stay there (and keep
@@ -568,14 +572,107 @@ impl fmt::Display for Ipv4Net {
     }
 }
 
+/// An IPv6 network of the allow/deny lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv6Net {
+    /// Network address with the host bits cleared.
+    pub addr: Ipv6Addr,
+    pub prefix_len: u32,
+}
+
+impl Ipv6Net {
+    /// Parses `a:b::c` or `a:b::/len`; host bits are cleared.
+    pub fn parse(text: &str) -> Result<Self> {
+        let (addr, prefix_len) = match text.split_once('/') {
+            Some((addr, len)) => (
+                addr,
+                len.trim()
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid prefix length in '{text}'"))?,
+            ),
+            None => (text, 128),
+        };
+        if prefix_len > 128 {
+            bail!("prefix length of '{text}' must be between 0 and 128");
+        }
+        let addr: Ipv6Addr = addr
+            .trim()
+            .parse()
+            .with_context(|| format!("'{text}' is not an IPv6 address or network"))?;
+        let mask = if prefix_len == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix_len)
+        };
+        Ok(Self {
+            addr: Ipv6Addr::from(u128::from(addr) & mask),
+            prefix_len,
+        })
+    }
+}
+
+impl fmt::Display for Ipv6Net {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix_len)
+    }
+}
+
+/// A network of the allow/deny lists, of either address family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpNet {
+    V4(Ipv4Net),
+    V6(Ipv6Net),
+}
+
+impl IpNet {
+    pub fn parse(text: &str) -> Result<Self> {
+        if text.contains(':') {
+            Ipv6Net::parse(text).map(IpNet::V6)
+        } else {
+            Ipv4Net::parse(text).map(IpNet::V4)
+        }
+    }
+}
+
+impl fmt::Display for IpNet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IpNet::V4(net) => net.fmt(f),
+            IpNet::V6(net) => net.fmt(f),
+        }
+    }
+}
+
+/// Splits a list into its IPv4 and IPv6 networks.
+pub fn split_families(nets: &[IpNet]) -> (Vec<Ipv4Net>, Vec<Ipv6Net>) {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for net in nets {
+        match net {
+            IpNet::V4(net) => v4.push(*net),
+            IpNet::V6(net) => v6.push(*net),
+        }
+    }
+    (v4, v6)
+}
+
 impl ListsConfig {
-    pub fn allow_nets(&self) -> Result<Vec<Ipv4Net>> {
-        self.allow.iter().map(|s| Ipv4Net::parse(s)).collect()
+    pub fn allow_nets(&self) -> Result<Vec<IpNet>> {
+        self.allow.iter().map(|s| IpNet::parse(s)).collect()
     }
 
-    pub fn deny_nets(&self) -> Result<Vec<Ipv4Net>> {
-        self.deny.iter().map(|s| Ipv4Net::parse(s)).collect()
+    pub fn deny_nets(&self) -> Result<Vec<IpNet>> {
+        self.deny.iter().map(|s| IpNet::parse(s)).collect()
     }
+}
+
+/// What happens to IPv6 packets for the protected ports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ipv6Mode {
+    Pass,
+    Drop,
+    Inspect,
 }
 
 /// What to do with flows that existed before the filter was attached.
@@ -594,8 +691,8 @@ pub enum AdoptMode {
 pub struct XdpConfig {
     /// XDP attach mode.
     pub mode: ConfigXdpMode,
-    /// Drop IPv6 traffic to the protected ports. Maps to `IPV6_PROTECT`.
-    pub drop_ipv6: bool,
+    /// IPv6 traffic to the protected ports. Maps to `IPV6_MODE`.
+    pub ipv6: Ipv6Mode,
     /// Pin the state maps so they survive a restart of the loader.
     pub keep_state: bool,
     /// Directory (on a bpf filesystem) the state maps are pinned in.
@@ -620,7 +717,7 @@ impl Default for XdpConfig {
     fn default() -> Self {
         Self {
             mode: ConfigXdpMode::Auto,
-            drop_ipv6: false,
+            ipv6: Ipv6Mode::Pass,
             keep_state: true,
             state_dir: "/sys/fs/bpf/minecraft-xdp".into(),
             adopt: AdoptMode::Socket,
@@ -1077,6 +1174,8 @@ mod tests {
         let err = toml::from_str::<Config>("[xdp]\nmode = \"hardware\"").unwrap_err();
         assert!(err.to_string().contains("hardware"));
         assert!(toml::from_str::<Config>("[xdp]\nadopt = \"all\"").is_err());
+        assert!(toml::from_str::<Config>("[xdp]\nipv6 = \"filter\"").is_err());
+        assert_eq!(parse("[xdp]\nipv6 = \"inspect\"").xdp.ipv6, Ipv6Mode::Inspect);
         assert!(toml::from_str::<Config>("[attack]\nchallenge = \"on\"").is_err());
         let err = toml::from_str::<Config>("[logging]\nlevel = \"verbose\"").unwrap_err();
         assert!(err.to_string().contains("verbose"));
@@ -1109,10 +1208,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_ipv6_networks() {
+        let net = Ipv6Net::parse("2001:db8::1").unwrap();
+        assert_eq!((net.addr, net.prefix_len), ("2001:db8::1".parse().unwrap(), 128));
+        // host bits are cleared
+        let net = Ipv6Net::parse("2001:db8:1:2:3:4:5:6/48").unwrap();
+        assert_eq!((net.addr, net.prefix_len), ("2001:db8:1::".parse().unwrap(), 48));
+        assert_eq!(net.to_string(), "2001:db8:1::/48");
+        let net = Ipv6Net::parse("::/0").unwrap();
+        assert_eq!((net.addr, net.prefix_len), (Ipv6Addr::UNSPECIFIED, 0));
+        for bad in ["2001:db8::/129", "2001:db8::/", "2001:zz::", ":::"] {
+            assert!(Ipv6Net::parse(bad).is_err(), "must be rejected: {bad}");
+        }
+
+        // the family is told by the colon
+        assert!(matches!(IpNet::parse("203.0.113.7").unwrap(), IpNet::V4(_)));
+        assert!(matches!(IpNet::parse("2001:db8::/32").unwrap(), IpNet::V6(_)));
+        let nets = [
+            IpNet::parse("10.0.0.0/8").unwrap(),
+            IpNet::parse("fd00::/8").unwrap(),
+            IpNet::parse("203.0.113.7").unwrap(),
+        ];
+        let (v4, v6) = split_families(&nets);
+        assert_eq!((v4.len(), v6.len()), (2, 1));
+    }
+
+    #[test]
     fn rejects_bad_lists_and_hosts() {
         assert!(parse("[lists]\nallow = [\"nonsense\"]").validate().is_err());
         assert!(parse("[lists]\ndeny = [\"1.2.3.4/40\"]").validate().is_err());
-        parse("[lists]\nallow = [\"10.0.0.0/8\"]\ndeny = [\"203.0.113.7\"]")
+        assert!(parse("[lists]\ndeny = [\"2001:db8::/200\"]").validate().is_err());
+        parse("[lists]\nallow = [\"10.0.0.0/8\", \"fd00::/8\"]\ndeny = [\"203.0.113.7\", \"2001:db8::1\"]")
             .validate()
             .unwrap();
 

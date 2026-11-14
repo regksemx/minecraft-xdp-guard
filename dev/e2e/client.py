@@ -6,8 +6,9 @@ import socket
 import sys
 import time
 
-SERVER = "10.99.0.1"
 SOURCE = sys.argv[1] if len(sys.argv) > 1 else ""  # local address to connect from
+SERVER = sys.argv[2] if len(sys.argv) > 2 else "10.99.0.1"
+FAMILY = socket.AF_INET6 if ":" in SERVER else socket.AF_INET
 MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
 TIMEOUT = 1.0
 handles = {}
@@ -39,7 +40,7 @@ def keep(sock):
 
 
 def tcp_connect(port, timeout=TIMEOUT):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = socket.socket(FAMILY, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     sock.bind((SOURCE, 0))
@@ -64,7 +65,7 @@ def udp_exchange(sock, port, payload, attempts=1):
 
 
 def new_udp():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = socket.socket(FAMILY, socket.SOCK_DGRAM)
     sock.settimeout(TIMEOUT)
     sock.bind((SOURCE, 0))
     return sock
@@ -148,7 +149,10 @@ def rak_ping(attempts="1"):
 def rak_connect(attempts="1"):
     sock = new_udp()
     ocr1 = b"\x05" + MAGIC + b"\x0b"
-    if udp_exchange(sock, 19132, ocr1 + bytes(1464 - len(ocr1)), int(attempts))[0] != 0x06:
+    # padded to an MTU of 1492 like the real client does: the IPv6 header is
+    # 20 bytes longer, so the datagram is 20 bytes shorter
+    padded = 1444 if FAMILY == socket.AF_INET6 else 1464
+    if udp_exchange(sock, 19132, ocr1 + bytes(padded - len(ocr1)), int(attempts))[0] != 0x06:
         return "bad reply"
     ocr2 = b"\x07" + MAGIC + b"\x04\x0a\x63\x00\x01\x4a\xbc" + (1492).to_bytes(2, "big") + bytes(8)
     if udp_exchange(sock, 19132, ocr2)[0] != 0x08:

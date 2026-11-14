@@ -16,8 +16,9 @@ an attack mode built for small machines.
 | Generic TCP guard (NetherNet signaling) | TCP | TCP handshake, then a TLS ClientHello or an HTTP request |
 | Generic UDP guard (voice chat) | UDP | nothing: every datagram needs a minimum size and optionally a fixed first byte, the limits do the rest |
 
-Everything else aimed at a protected port is dropped. IPv4 only; IPv6 to the
-protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
+Everything else aimed at a protected port is dropped. IPv6 is either ignored,
+dropped for the protected ports, or inspected by the same rules as IPv4
+(`[xdp] ipv6`).
 
 ## Features
 
@@ -40,8 +41,10 @@ protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
   pong in a map and the filter replies from it, so server list pings and
   ping floods never reach the server.
 - **Packet rate limit** per verified connection.
-- **Allow and deny lists** (IPv4 networks). Bans can be added while the
-  filter runs, with a lifetime, and cut the banned address off immediately.
+- **Allow and deny lists** (IPv4 and IPv6 networks). Bans can be added while
+  the filter runs, with a lifetime, and cut the banned address off
+  immediately.
+- **IPv6**: inspected by the same rules, in the same tables.
 - **Restart without disconnects and without a gap**: verified connections
   and known IPs live in pinned maps and survive a restart of the loader, and
   a reload swaps the program atomically. A crashed loader leaves the filter
@@ -182,8 +185,8 @@ unknown IPs are challenged, and `udp_flow_pps` caps each session.
 | `good_after_secs` | 180 | A game connection of this age makes its IP a proven player (0 = never). |
 | `good_ttl_hours` | 72 | How long that lasts. |
 
-**`[lists]`** — `allow` and `deny`: IPv4 addresses or networks that are never
-inspected, or always dropped, on the protected ports.
+**`[lists]`** — `allow` and `deny`: IPv4 and IPv6 addresses or networks that
+are never inspected, or always dropped, on the protected ports.
 
 Bans do not need a restart:
 
@@ -195,7 +198,8 @@ xdp-loader deny -c /etc/minecraft-xdp/config.toml del 198.51.100.0/24
 ```
 
 A ban takes effect with the next packet, also cuts the connections the
-address has open, and survives a restart of the loader. `add -` reads
+address has open (IPv6 ones within a second), and survives a restart of the
+loader. `add -` reads
 addresses from stdin, which makes it easy to feed from an anti-cheat or a
 log watcher.
 
@@ -204,7 +208,7 @@ log watcher.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `mode` | `"auto"` | `"auto"` (native if the NIC supports it, else generic), `"driver"`, `"skb"`. |
-| `drop_ipv6` | false | Drop IPv6 packets to the protected ports. |
+| `ipv6` | `"pass"` | IPv6 packets for the protected ports: `"pass"` (ignored: only safe if the services are not reachable over IPv6), `"drop"`, `"inspect"` (same rules as IPv4; limits per IP count per /64). |
 | `keep_state` | true | Keep verified connections, known IPs and bans across restarts. |
 | `state_dir` | `/sys/fs/bpf/minecraft-xdp` | Where the state maps are pinned. |
 | `adopt` | `"socket"` | Connections from before the start: `"socket"` (TCP only if this host's kernel has the connection), `"blind"`, `"off"`. |
@@ -233,6 +237,11 @@ alert rules for vmalert / Prometheus and a Grafana dashboard.
   guard.
 - **Bots with real IPs and valid logins pass**, as they must: that is what
   the per IP limits, the login budget and a limbo / anti-bot plugin are for.
+- **IPv6 flows are stored by a hash of their addresses**, keyed with a
+  per-boot secret, in the same tables as IPv4 flows; the limits per IP apply
+  to the /64 of the source. Fragments and packets with more than four
+  extension headers are dropped for the protected ports. Bedrock pings over
+  IPv6 are answered by the server, not from the pong cache.
 - **Native XDP needs driver support** (igb, ixgbe, i40e, ice, mlx4/5, bnxt,
   virtio_net, ...). Generic mode works everywhere and is several times
   slower, which is still plenty for a 1 Gbit/s port.

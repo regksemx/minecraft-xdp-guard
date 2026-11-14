@@ -15,6 +15,9 @@
  *   ICE      A STUN binding request, then only STUN and DTLS.
  *   UDP guard  Nothing but a first byte and a minimum size (voice chat).
  *
+ * IPv6 is, depending on IPV6_MODE, passed untouched, dropped for the
+ * protected ports, or inspected exactly like IPv4.
+ *
  * Verified flows skip inspection and pay for a single map lookup. All other
  * traffic is dropped at the driver level, before the kernel spends anything
  * on it.
@@ -178,6 +181,25 @@ struct
     __type(value, __u64);
 } deny_v4 SEC(".maps");
 
+// the same lists for IPv6
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 4096);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __type(key, struct lpm_v6_key);
+    __type(value, __u8);
+} allow_v6 SEC(".maps");
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 65536);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __type(key, struct lpm_v6_key);
+    __type(value, __u64);
+} deny_v6 SEC(".maps");
+
 // the server's answer to an unconnected ping, see struct pong_cache
 struct
 {
@@ -208,9 +230,34 @@ struct packet
     struct statistics *stats; // NULL unless PROMETHEUS
     __u64 now;                // coarse monotonic clock, one read per packet
     __u64 len;                // frame length, for the byte counters
-    __u32 l3_offset;          // offset of the IPv4 header inside the frame
+    __u32 l3_offset;          // offset of the IP header inside the frame
+    __u32 ip_key;             // key of the source in ip_table
+    const struct ipv6hdr *ip6; // NULL for IPv4
     struct ipv4_flow_key flow;
 };
+
+/*
+ * IPv6 flows live in the same tables as IPv4 flows. Instead of widening
+ * every key to 128 bit addresses (and making every IPv4 lookup pay for
+ * it), both addresses of an IPv6 flow are hashed into the 64 bits an IPv4
+ * flow key has for its addresses, with a seed nobody outside knows. Two
+ * flows only collide if those 64 bits and both ports are equal.
+ *
+ * The limits per source are kept per /64, the smallest network an IPv6
+ * client can be handed: the key of ip_table is a hash of that prefix.
+ */
+static __always_inline void ipv6_keys(struct packet *p, const struct ipv6hdr *ip6)
+{
+    const __u64 *src = (const __u64 *)&ip6->saddr;
+    const __u64 *dst = (const __u64 *)&ip6->daddr;
+    __u64 hash = mix64(src[0] ^ FLOW6_SEED);
+    p->ip_key = (__u32)hash;
+    hash = mix64(hash ^ src[1]);
+    hash = mix64(hash ^ dst[0]);
+    hash = mix64(hash ^ dst[1]);
+    p->flow.src_ip = (__u32)hash;
+    p->flow.dst_ip = (__u32)(hash >> 32);
+}
 
 static __always_inline __u32 drop_packet(const struct packet *p)
 {
@@ -289,19 +336,41 @@ static __always_inline __u32 check_lists(const struct packet *p)
     {
         return LIST_UNLISTED;
     }
-    const struct lpm_v4_key key = {.prefixlen = 32, .addr = p->flow.src_ip};
-    if (HAS_DENY)
+    const __u64 *until = NULL;
+    const __u8 *allowed = NULL;
+    if (p->ip6)
     {
-        // an expired ban is ignored here and removed by the next
-        // `xdp-loader deny` call or restart
-        const __u64 *until = bpf_map_lookup_elem(&deny_v4, &key);
-        if (until && (*until <= DENY_RUNTIME || p->now < *until))
+        struct lpm_v6_key key = {.prefixlen = 128};
+        __builtin_memcpy(key.addr, &p->ip6->saddr, sizeof(key.addr));
+        if (HAS_DENY)
         {
-            count_stat(p->stats, STAT_DENYLIST, 1);
-            return LIST_DENIED;
+            until = bpf_map_lookup_elem(&deny_v6, &key);
+        }
+        if (HAS_ALLOW)
+        {
+            allowed = bpf_map_lookup_elem(&allow_v6, &key);
         }
     }
-    if (HAS_ALLOW && bpf_map_lookup_elem(&allow_v4, &key))
+    else
+    {
+        const struct lpm_v4_key key = {.prefixlen = 32, .addr = p->flow.src_ip};
+        if (HAS_DENY)
+        {
+            until = bpf_map_lookup_elem(&deny_v4, &key);
+        }
+        if (HAS_ALLOW)
+        {
+            allowed = bpf_map_lookup_elem(&allow_v4, &key);
+        }
+    }
+    // an expired ban is ignored here and removed by the next `xdp-loader
+    // deny` call or restart
+    if (until && (*until <= DENY_RUNTIME || p->now < *until))
+    {
+        count_stat(p->stats, STAT_DENYLIST, 1);
+        return LIST_DENIED;
+    }
+    if (allowed)
     {
         count_stat(p->stats, STAT_ALLOWLIST, 1);
         return LIST_ALLOWED;
@@ -405,7 +474,7 @@ enum admit_result
 static __always_inline __u32 admit(const struct packet *p, const __u32 kind, const __u32 ip_limit, const __u32 cpu_budget, const __u8 challenge, const __u32 extra)
 {
     __u8 good = 0;
-    struct ip_state *ip = bpf_map_lookup_elem(&ip_table, &p->flow.src_ip);
+    struct ip_state *ip = bpf_map_lookup_elem(&ip_table, &p->ip_key);
     if (ip)
     {
         if (elapsed(p->now, ip->window_start) >= LIMIT_WINDOW_NS)
@@ -445,7 +514,7 @@ static __always_inline __u32 admit(const struct packet *p, const __u32 kind, con
         {
             fresh.hits[kind] = 1;
         }
-        if (bpf_map_update_elem(&ip_table, &p->flow.src_ip, &fresh, BPF_ANY) < 0)
+        if (bpf_map_update_elem(&ip_table, &p->ip_key, &fresh, BPF_ANY) < 0)
         {
             count_stat(p->stats, STAT_TABLE_FULL, 1);
             return ADMIT_ERROR;
@@ -462,7 +531,7 @@ static __always_inline __u32 admit(const struct packet *p, const __u32 kind, con
 // a game flow lived long enough: its source ip is a proven player from now on
 static __always_inline void mark_ip_good(const struct packet *p)
 {
-    struct ip_state *ip = bpf_map_lookup_elem(&ip_table, &p->flow.src_ip);
+    struct ip_state *ip = bpf_map_lookup_elem(&ip_table, &p->ip_key);
     if (ip)
     {
         ip->good_until = p->now + GOOD_TTL_NS;
@@ -470,7 +539,7 @@ static __always_inline void mark_ip_good(const struct packet *p)
     else
     {
         const struct ip_state fresh = {.window_start = p->now, .good_until = p->now + GOOD_TTL_NS};
-        if (bpf_map_update_elem(&ip_table, &p->flow.src_ip, &fresh, BPF_ANY) < 0)
+        if (bpf_map_update_elem(&ip_table, &p->ip_key, &fresh, BPF_ANY) < 0)
         {
             return;
         }
@@ -483,6 +552,7 @@ enum flow_verdict
     FLOW_PASS = 0,
     FLOW_EXPIRED,
     FLOW_LIMITED,
+    FLOW_BANNED,
 };
 
 /*
@@ -504,6 +574,12 @@ static __always_inline __u32 flow_touch(const struct packet *p, struct flow_entr
     if (age > idle_ns)
     {
         return FLOW_EXPIRED;
+    }
+    // a ban added while the flow was open: checked here, once per second,
+    // so that the deny list costs the packets of verified flows nothing
+    if (HAS_DENY && check_lists(p) == LIST_DENIED)
+    {
+        return FLOW_BANNED;
     }
     flow->win_start = p->now;
     flow->win_pkts = 1;
@@ -584,12 +660,23 @@ static __always_inline __u8 detect_tcp_bypass(const struct tcphdr *tcp)
 static __always_inline __u8 kernel_has_connection(const struct packet *p)
 {
     struct bpf_sock_tuple tuple = {};
-    tuple.ipv4.saddr = p->flow.src_ip;
-    tuple.ipv4.daddr = p->flow.dst_ip;
-    tuple.ipv4.sport = p->flow.src_port;
-    tuple.ipv4.dport = p->flow.dst_port;
-
-    struct bpf_sock *sk = bpf_sk_lookup_tcp(p->ctx, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+    struct bpf_sock *sk;
+    if (p->ip6)
+    {
+        __builtin_memcpy(tuple.ipv6.saddr, &p->ip6->saddr, sizeof(tuple.ipv6.saddr));
+        __builtin_memcpy(tuple.ipv6.daddr, &p->ip6->daddr, sizeof(tuple.ipv6.daddr));
+        tuple.ipv6.sport = p->flow.src_port;
+        tuple.ipv6.dport = p->flow.dst_port;
+        sk = bpf_sk_lookup_tcp(p->ctx, &tuple, sizeof(tuple.ipv6), BPF_F_CURRENT_NETNS, 0);
+    }
+    else
+    {
+        tuple.ipv4.saddr = p->flow.src_ip;
+        tuple.ipv4.daddr = p->flow.dst_ip;
+        tuple.ipv4.sport = p->flow.src_port;
+        tuple.ipv4.dport = p->flow.dst_port;
+        sk = bpf_sk_lookup_tcp(p->ctx, &tuple, sizeof(tuple.ipv4), BPF_F_CURRENT_NETNS, 0);
+    }
     if (!sk)
     {
         return 0;
@@ -599,7 +686,8 @@ static __always_inline __u8 kernel_has_connection(const struct packet *p)
     return established;
 }
 
-static __always_inline __u32 handle_tcp(struct packet *p, const struct iphdr *ip, const struct tcphdr *tcp, const __u32 tcp_hdr_len, const __u8 guard)
+// l4_len: length of the TCP header plus payload, as the IP header states it
+static __always_inline __u32 handle_tcp(struct packet *p, const struct tcphdr *tcp, const __u32 tcp_hdr_len, const __u32 l4_len, const __u8 guard)
 {
     if (detect_tcp_bypass(tcp))
     {
@@ -614,7 +702,7 @@ static __always_inline __u32 handle_tcp(struct packet *p, const struct iphdr *ip
 
         // drop SYNs carrying payload (e.g. TCP fast open): the data would
         // reach the backend without ever passing the inspection state machine
-        if (bpf_ntohs(ip->tot_len) > (ip->ihl * 4) + tcp_hdr_len)
+        if (l4_len > tcp_hdr_len)
         {
             count_stat(p->stats, STAT_TCP_BYPASS, 1);
             goto drop;
@@ -671,9 +759,13 @@ static __always_inline __u32 handle_tcp(struct packet *p, const struct iphdr *ip
             count_stat(p->stats, STAT_TCP_RATE_LIMITED, 1);
             goto drop;
         }
-        // idle for too long: forget the connection, the packet is handled
-        // like one of an unknown flow
+        // idle for too long, or banned in the meantime: forget the
+        // connection, the packet is handled like one of an unknown flow
         bpf_map_delete_elem(&verified_tcp, &p->flow);
+        if (touched == FLOW_BANNED)
+        {
+            goto drop;
+        }
     }
 
     const __u32 listed = check_lists(p);
@@ -704,9 +796,8 @@ static __always_inline __u32 handle_tcp(struct packet *p, const struct iphdr *ip
 
     const __u8 *tcp_payload = (const __u8 *)tcp + tcp_hdr_len;
 
-    // ip total length - ip header - tcp header = length of the tcp payload
-    const __u16 ip_tot_len = bpf_ntohs(ip->tot_len);
-    const __u16 tcp_payload_len = ip_tot_len - (ip->ihl * 4) - tcp_hdr_len;
+    // the caller made sure the tcp header fits into l4_len
+    const __u16 tcp_payload_len = (__u16)(l4_len - tcp_hdr_len);
     const __u8 *tcp_payload_end = tcp_payload + tcp_payload_len;
 
     // tcp packet split over multiple ethernet frames, we don't support that
@@ -943,7 +1034,7 @@ static __always_inline __u16 ipv4_header_checksum(const struct iphdr *ip)
  * Returns XDP_PASS (let the server answer) whenever the cached pong can not
  * be used.
  */
-static __always_inline __u32 answer_ping(const struct packet *p, const struct iphdr *ip, const __u8 *payload, const __u32 payload_len)
+static __always_inline __u32 answer_ping(const struct packet *p, const __u8 *payload, const __u32 payload_len)
 {
     __u32 zero = 0;
     const struct pong_cache *pong = bpf_map_lookup_elem(&pong_cache, &zero);
@@ -953,7 +1044,9 @@ static __always_inline __u32 answer_ping(const struct packet *p, const struct ip
     }
     __u32 pong_len = pong->len;
     barrier_var(pong_len);
-    if (pong_len < PONG_MIN || pong_len > PONG_MAX || elapsed(p->now, pong->updated) > PONG_MAX_AGE_NS || ip->ihl != 5)
+    // IP options would move everything behind them: let the server answer
+    if (pong_len < PONG_MIN || pong_len > PONG_MAX || elapsed(p->now, pong->updated) > PONG_MAX_AGE_NS ||
+        (const void *)payload != p->data + p->l3_offset + sizeof(struct iphdr) + sizeof(struct udphdr))
     {
         return XDP_PASS;
     }
@@ -1004,7 +1097,15 @@ static __always_inline __u32 answer_ping(const struct packet *p, const struct ip
 
     reply[0] = RAKNET_UNCONNECTED_PONG;
     *(__u64 *)(reply + 1) = ping_time;
-    if (bpf_xdp_store_bytes(p->ctx, l3_offset + sizeof(*reply_ip) + sizeof(*reply_udp) + PONG_HEADER_LEN, (void *)pong->data, pong_len))
+    // the length was checked at the top; restated right before the call
+    // because the verifier only accepts a size whose bounds it can still see
+    __u32 copy_len = pong_len;
+    barrier_var(copy_len);
+    if (copy_len < PONG_MIN || copy_len > PONG_MAX)
+    {
+        return XDP_DROP;
+    }
+    if (bpf_xdp_store_bytes(p->ctx, l3_offset + sizeof(*reply_ip) + sizeof(*reply_udp) + PONG_HEADER_LEN, (void *)pong->data, copy_len))
     {
         return XDP_DROP;
     }
@@ -1025,7 +1126,7 @@ static __always_inline void count_udp_refusal(const struct packet *p, const __u3
     }
 }
 
-static __always_inline __u32 handle_udp(struct packet *p, const struct iphdr *ip, const struct udphdr *udp, const __u32 class)
+static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *udp, const __u32 class)
 {
     const __u8 ice = class == PORT_ICE;
     const __u8 guard = class == PORT_UDP_GUARD;
@@ -1060,6 +1161,11 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct iphdr *ip
         if (touched == FLOW_LIMITED)
         {
             count_stat(p->stats, STAT_UDP_RATE_LIMITED, 1);
+            goto drop;
+        }
+        if (touched == FLOW_BANNED)
+        {
+            bpf_map_delete_elem(&verified_udp, &p->flow);
             goto drop;
         }
         if (touched == FLOW_EXPIRED)
@@ -1159,9 +1265,10 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct iphdr *ip
             goto drop;
         }
         count_stat(p->stats, STAT_RAKNET_PING, 1);
-        if (PONG_REPLY)
+        // IPv4 only: over IPv6 the pong would need a UDP checksum
+        if (PONG_REPLY && !p->ip6)
         {
-            return answer_ping(p, ip, payload, udp_len - sizeof(struct udphdr));
+            return answer_ping(p, payload, udp_len - sizeof(struct udphdr));
         }
         return XDP_PASS;
     }
@@ -1249,12 +1356,153 @@ drop:
 }
 
 /* ------------------------------------------------------------------------
- * IPv6: the filter only inspects IPv4, so IPv6 must not become a way
- * around it. With IPV6_PROTECT everything aimed at a protected port is
- * dropped.
+ * Shared tail of both IP versions
  * --------------------------------------------------------------------- */
 
-static __always_inline __u32 handle_ipv6(const void *l3, const void *data_end, const __u64 len)
+// looks up the statistics slot and counts the packet; returns 0 on failure
+static __always_inline __u8 packet_begin(struct packet *p)
+{
+    if (PROMETHEUS)
+    {
+        __u32 zero = 0;
+        p->stats = bpf_map_lookup_elem(&stats_map, &zero);
+        if (!p->stats)
+        {
+            return 0; // per-cpu array index 0 always exists, this is unreachable
+        }
+    }
+    count_stat(p->stats, STAT_INCOMING_PACKETS, 1);
+    count_stat(p->stats, STAT_INCOMING_BYTES, p->len);
+    return 1;
+}
+
+/*
+ * Hands a packet for a protected port to its protocol handler.
+ *
+ * l4      the TCP or UDP header
+ * l4_len  length of everything from l4 on, as the IP header states it
+ */
+static __always_inline __u32 dispatch(struct packet *p, const void *l4, const __u8 l4_proto, const __u32 l4_len, const __u32 class)
+{
+    if (l4_proto == IPPROTO_UDP)
+    {
+        const struct udphdr *udp = l4;
+        if ((const void *)(udp + 1) > p->data_end)
+        {
+            return XDP_DROP; // checked by the parsers already, restated for the verifier
+        }
+        return handle_udp(p, udp, class);
+    }
+
+    const struct tcphdr *tcp = l4;
+    if ((const void *)(tcp + 1) > p->data_end || tcp->doff < 5)
+    {
+        count_stat(p->stats, STAT_MALFORMED, 1);
+        return drop_packet(p);
+    }
+    const __u32 tcp_hdr_len = tcp->doff * 4;
+    if ((const void *)tcp + tcp_hdr_len > p->data_end || l4_len < tcp_hdr_len)
+    {
+        count_stat(p->stats, STAT_MALFORMED, 1);
+        return drop_packet(p);
+    }
+    return handle_tcp(p, tcp, tcp_hdr_len, l4_len, class == PORT_GUARD);
+}
+
+/* ------------------------------------------------------------------------
+ * IPv6. Depending on IPV6_MODE packets for the protected ports are dropped
+ * as a whole (so IPv6 is no way around a filter that only inspects IPv4) or
+ * run through the same inspection as IPv4.
+ * --------------------------------------------------------------------- */
+
+// returned by the parsers below when the packet has to be inspected; every
+// other value is the final XDP verdict
+#define PARSED 0xFFFF
+
+/*
+ * Finds the transport header of an IPv6 packet behind its extension
+ * headers. Returns IPV6_TRANSPORT_NONE if the packet carries neither TCP nor
+ * UDP (or is a non-first fragment, which has no ports),
+ * IPV6_TRANSPORT_UNWALKABLE if the chain is longer or deeper than any real
+ * packet's, and otherwise:
+ *
+ *   bits  0-15  offset of the transport header inside the frame
+ *   bits 16-23  its protocol
+ *   bit  24     the packet is a (first) fragment
+ *   bits 32-47  length of the extension headers
+ *
+ * A global function for the same reason as handshake_host_hash(): each way
+ * through the chain would otherwise be a separate path through the whole
+ * program for the verifier. This way the caller continues with one state.
+ */
+#define IPV6_TRANSPORT_NONE 0
+#define IPV6_TRANSPORT_UNWALKABLE 1
+#define IPV6_MAX_L4_OFFSET 1024
+
+__noinline __u64 ipv6_transport(struct xdp_md *ctx, __u32 l3_offset)
+{
+    const void *data = (const void *)(long)ctx->data;
+    const void *data_end = (const void *)(long)ctx->data_end;
+    const struct ipv6hdr *ip6 = data + (l3_offset & 0x3F);
+    if ((const void *)(ip6 + 1) > data_end)
+    {
+        return IPV6_TRANSPORT_NONE;
+    }
+
+    __u8 next = ip6->nexthdr;
+    __u32 offset = (l3_offset & 0x3F) + sizeof(*ip6);
+    __u32 extensions_len = 0;
+    __u64 fragment = 0;
+
+    for (__u32 i = 0; i < IPV6_MAX_EXT_HEADERS; i++)
+    {
+        if (next != IPPROTO_HOPOPTS && next != IPPROTO_ROUTING && next != IPPROTO_DSTOPTS && next != IPPROTO_FRAGMENT)
+        {
+            break;
+        }
+        if (offset > IPV6_MAX_L4_OFFSET)
+        {
+            return IPV6_TRANSPORT_UNWALKABLE;
+        }
+        const __u8 *header = (const __u8 *)data + offset;
+        if ((const void *)(header + 8) > data_end)
+        {
+            return IPV6_TRANSPORT_NONE;
+        }
+        __u32 ext_len = 8;
+        if (next == IPPROTO_FRAGMENT)
+        {
+            // only the first fragment carries the ports; dropping it is
+            // enough, the others can never be reassembled
+            if ((header[2] << 8 | (header[3] & 0xF8)) != 0)
+            {
+                return IPV6_TRANSPORT_NONE;
+            }
+            fragment = 1;
+        }
+        else
+        {
+            ext_len = ((__u32)header[1] + 1) * 8;
+        }
+        next = header[0];
+        offset += ext_len;
+        extensions_len += ext_len;
+    }
+
+    if (next == IPPROTO_HOPOPTS || next == IPPROTO_ROUTING || next == IPPROTO_DSTOPTS || next == IPPROTO_FRAGMENT ||
+        offset > IPV6_MAX_L4_OFFSET)
+    {
+        return IPV6_TRANSPORT_UNWALKABLE;
+    }
+    if (next != IPPROTO_TCP && next != IPPROTO_UDP)
+    {
+        return IPV6_TRANSPORT_NONE;
+    }
+    return (__u64)offset | ((__u64)next << 16) | (fragment << 24) | ((__u64)extensions_len << 32);
+}
+
+static __always_inline __u32 parse_ipv6(struct xdp_md *ctx, const void *data, const void *data_end, const void *l3, const __u32 l3_offset,
+                                        struct packet *out, const void **l4, __u8 *l4_proto, __u32 *l4_len, __u32 *port_class)
 {
     const struct ipv6hdr *ip6 = l3;
     if ((const void *)(ip6 + 1) > data_end)
@@ -1262,126 +1510,90 @@ static __always_inline __u32 handle_ipv6(const void *l3, const void *data_end, c
         return XDP_PASS;
     }
 
-    __u8 next = ip6->nexthdr;
-    const __u8 *cursor = (const __u8 *)(ip6 + 1);
-
-    // skip the extension headers in front of the transport header
-    for (__u32 i = 0; i < IPV6_MAX_EXT_HEADERS; i++)
-    {
-        if (next != IPPROTO_HOPOPTS && next != IPPROTO_ROUTING && next != IPPROTO_DSTOPTS && next != IPPROTO_FRAGMENT)
-        {
-            break;
-        }
-        if ((const void *)(cursor + 8) > data_end)
-        {
-            return XDP_PASS;
-        }
-        if (next == IPPROTO_FRAGMENT)
-        {
-            // only the first fragment carries the ports; dropping it is
-            // enough, the others can never be reassembled
-            if ((cursor[2] << 8 | (cursor[3] & 0xF8)) != 0)
-            {
-                return XDP_PASS;
-            }
-            next = cursor[0];
-            cursor += 8;
-        }
-        else
-        {
-            const __u32 ext_len = ((__u32)cursor[1] + 1) * 8;
-            next = cursor[0];
-            cursor += ext_len;
-        }
-    }
-
-    if (next != IPPROTO_TCP && next != IPPROTO_UDP)
+    const __u64 transport = ipv6_transport(ctx, l3_offset);
+    if (transport == IPV6_TRANSPORT_NONE)
     {
         return XDP_PASS;
     }
-    // source and destination port sit at the same place in both headers
-    if ((const void *)(cursor + 4) > data_end)
+    // a chain of extension headers nobody sends for real: without the ports
+    // the packet can not be told from one for a protected port
+    if (transport == IPV6_TRANSPORT_UNWALKABLE)
+    {
+        return XDP_DROP;
+    }
+    __u32 l4_offset = transport & 0xFFFF;
+    const __u8 next = (transport >> 16) & 0xFF;
+    const __u8 fragment = (transport >> 24) & 1;
+    const __u32 extensions_len = (transport >> 32) & 0xFFFF;
+    if (l4_offset > IPV6_MAX_L4_OFFSET)
+    {
+        return XDP_DROP;
+    }
+    const __u8 *cursor = (const __u8 *)data + l4_offset;
+
+    // source and destination port sit at the same place in both headers,
+    // the UDP header is the shorter one
+    const struct udphdr *udp = (const void *)cursor;
+    if ((const void *)(udp + 1) > data_end)
     {
         return XDP_PASS;
     }
-    const __u32 dest_port = (__u32)cursor[2] << 8 | cursor[3];
+    const __u32 dest_port = bpf_ntohs(udp->dest);
     const __u32 class = next == IPPROTO_TCP ? tcp_port_class(dest_port) : udp_port_class(dest_port);
     if (class == PORT_UNPROTECTED)
     {
         return XDP_PASS;
     }
 
-    if (PROMETHEUS)
-    {
-        __u32 zero = 0;
-        struct statistics *stats = bpf_map_lookup_elem(&stats_map, &zero);
-        count_stat(stats, STAT_INCOMING_PACKETS, 1);
-        count_stat(stats, STAT_INCOMING_BYTES, len);
-        count_stat(stats, STAT_IPV6_DROPPED, 1);
-        count_stat(stats, STAT_DROPPED_PACKETS, 1);
-        count_stat(stats, STAT_DROPPED_BYTES, len);
-    }
-    return XDP_DROP;
-}
-
-/* ------------------------------------------------------------------------
- * XDP entry point
- * --------------------------------------------------------------------- */
-
-SEC("xdp")
-__s32 minecraft_filter(struct xdp_md *ctx)
-{
-    const void *data = (const void *)(long)ctx->data;
-    const void *data_end = (const void *)(long)ctx->data_end;
-
-    const struct ethhdr *eth = data;
-    if ((const void *)(eth + 1) > data_end)
+    struct packet p = {
+        .ctx = ctx,
+        .data = data,
+        .data_end = data_end,
+        .stats = NULL,
+        .now = bpf_ktime_get_coarse_ns(),
+        .len = (__u64)(data_end - data),
+        .l3_offset = l3_offset,
+        .ip6 = ip6,
+        .flow = {
+            .src_port = udp->source,
+            .dst_port = udp->dest,
+        },
+    };
+    if (!packet_begin(&p))
     {
         return XDP_DROP;
     }
 
-    __be16 l3_proto = eth->h_proto;
-    const void *l3 = eth + 1;
-    __u32 l3_offset = sizeof(*eth);
-
-    // up to two VLAN tags (the NIC usually strips them, but not always)
-    if (l3_proto == bpf_htons(ETH_P_8021Q) || l3_proto == bpf_htons(ETH_P_8021AD))
+    if (IPV6_MODE == IPV6_DROP)
     {
-        const struct vlan_tag *tag = l3;
-        if ((const void *)(tag + 1) > data_end)
-        {
-            return XDP_DROP;
-        }
-        l3_proto = tag->encapsulated_proto;
-        l3 = tag + 1;
-        l3_offset += sizeof(*tag);
-        if (l3_proto == bpf_htons(ETH_P_8021Q))
-        {
-            tag = l3;
-            if ((const void *)(tag + 1) > data_end)
-            {
-                return XDP_DROP;
-            }
-            l3_proto = tag->encapsulated_proto;
-            l3 = tag + 1;
-            l3_offset += sizeof(*tag);
-        }
+        count_stat(p.stats, STAT_IPV6_DROPPED, 1);
+        return drop_packet(&p);
+    }
+    // like for IPv4: nothing that is protected relies on fragmentation
+    if (fragment)
+    {
+        count_stat(p.stats, STAT_FRAGMENT_DROPPED, 1);
+        return drop_packet(&p);
+    }
+    const __u32 payload_len = bpf_ntohs(ip6->payload_len);
+    if (payload_len < extensions_len + sizeof(*udp))
+    {
+        count_stat(p.stats, STAT_MALFORMED, 1);
+        return drop_packet(&p);
     }
 
-    if (l3_proto == bpf_htons(ETH_P_IPV6))
-    {
-        if (!IPV6_PROTECT)
-        {
-            return XDP_PASS;
-        }
-        return handle_ipv6(l3, data_end, (__u64)(data_end - data));
-    }
+    ipv6_keys(&p, ip6);
+    *out = p;
+    *l4 = udp;
+    *l4_proto = next;
+    *l4_len = payload_len - extensions_len;
+    *port_class = class;
+    return PARSED;
+}
 
-    if (l3_proto != bpf_htons(ETH_P_IP))
-    {
-        return XDP_PASS;
-    }
-
+static __always_inline __u32 parse_ipv4(struct xdp_md *ctx, const void *data, const void *data_end, const void *l3, const __u32 l3_offset,
+                                        struct packet *out, const void **l4_out, __u8 *l4_proto_out, __u32 *l4_len, __u32 *port_class)
+{
     const struct iphdr *ip = l3;
     if ((const void *)(ip + 1) > data_end || ip->ihl < 5)
     {
@@ -1433,6 +1645,8 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         .now = bpf_ktime_get_coarse_ns(),
         .len = (__u64)(data_end - data),
         .l3_offset = l3_offset,
+        .ip_key = ip->saddr,
+        .ip6 = NULL,
         .flow = {
             .src_ip = ip->saddr,
             .dst_ip = ip->daddr,
@@ -1440,19 +1654,10 @@ __s32 minecraft_filter(struct xdp_md *ctx)
             .dst_port = udp->dest,
         },
     };
-
-    if (PROMETHEUS)
+    if (!packet_begin(&p))
     {
-        __u32 zero = 0;
-        p.stats = bpf_map_lookup_elem(&stats_map, &zero);
-        if (!p.stats)
-        {
-            // per-cpu array index 0 always exists, this is unreachable
-            return XDP_DROP;
-        }
+        return XDP_DROP;
     }
-    count_stat(p.stats, STAT_INCOMING_PACKETS, 1);
-    count_stat(p.stats, STAT_INCOMING_BYTES, p.len);
 
     // first fragment of a fragmented packet (MF set, offset 0) aimed at a
     // protected port: the remaining payload is in fragments the filter never
@@ -1466,25 +1671,94 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         return drop_packet(&p);
     }
 
-    if (l4_proto == IPPROTO_UDP)
-    {
-        return handle_udp(&p, ip, udp, class);
-    }
-
-    const struct tcphdr *tcp = l4;
-    if ((const void *)(tcp + 1) > data_end || tcp->doff < 5)
-    {
-        count_stat(p.stats, STAT_MALFORMED, 1);
-        return drop_packet(&p);
-    }
-    const __u32 tcp_hdr_len = tcp->doff * 4;
-    if ((const void *)tcp + tcp_hdr_len > data_end)
+    const __u32 ip_len = bpf_ntohs(ip->tot_len);
+    const __u32 ip_hdr_len = ip->ihl * 4;
+    if (ip_len < ip_hdr_len + sizeof(*udp))
     {
         count_stat(p.stats, STAT_MALFORMED, 1);
         return drop_packet(&p);
     }
 
-    return handle_tcp(&p, ip, tcp, tcp_hdr_len, class == PORT_GUARD);
+    *out = p;
+    *l4_out = l4;
+    *l4_proto_out = l4_proto;
+    *l4_len = ip_len - ip_hdr_len;
+    *port_class = class;
+    return PARSED;
+}
+
+/* ------------------------------------------------------------------------
+ * XDP entry point
+ * --------------------------------------------------------------------- */
+
+SEC("xdp")
+__s32 minecraft_filter(struct xdp_md *ctx)
+{
+    const void *data = (const void *)(long)ctx->data;
+    const void *data_end = (const void *)(long)ctx->data_end;
+
+    const struct ethhdr *eth = data;
+    if ((const void *)(eth + 1) > data_end)
+    {
+        return XDP_DROP;
+    }
+
+    __be16 l3_proto = eth->h_proto;
+    const void *l3 = eth + 1;
+    __u32 l3_offset = sizeof(*eth);
+
+    // up to two VLAN tags (the NIC usually strips them, but not always)
+    if (l3_proto == bpf_htons(ETH_P_8021Q) || l3_proto == bpf_htons(ETH_P_8021AD))
+    {
+        const struct vlan_tag *tag = l3;
+        if ((const void *)(tag + 1) > data_end)
+        {
+            return XDP_DROP;
+        }
+        l3_proto = tag->encapsulated_proto;
+        l3 = tag + 1;
+        l3_offset += sizeof(*tag);
+        if (l3_proto == bpf_htons(ETH_P_8021Q))
+        {
+            tag = l3;
+            if ((const void *)(tag + 1) > data_end)
+            {
+                return XDP_DROP;
+            }
+            l3_proto = tag->encapsulated_proto;
+            l3 = tag + 1;
+            l3_offset += sizeof(*tag);
+        }
+    }
+
+    // Both IP versions end up in the one dispatch() call below: the
+    // handlers are inlined, and a second call site would double the size of
+    // the program and the work of the verifier
+    struct packet p;
+    const void *l4 = NULL;
+    __u8 l4_proto = 0;
+    __u32 l4_len = 0;
+    __u32 class = PORT_UNPROTECTED;
+    __u32 parsed;
+
+    if (l3_proto == bpf_htons(ETH_P_IP))
+    {
+        parsed = parse_ipv4(ctx, data, data_end, l3, l3_offset, &p, &l4, &l4_proto, &l4_len, &class);
+    }
+    else if (l3_proto == bpf_htons(ETH_P_IPV6) && IPV6_MODE != IPV6_PASS)
+    {
+        parsed = parse_ipv6(ctx, data, data_end, l3, l3_offset, &p, &l4, &l4_proto, &l4_len, &class);
+    }
+    else
+    {
+        return XDP_PASS;
+    }
+    if (parsed != PARSED)
+    {
+        return (__s32)parsed;
+    }
+
+    return dispatch(&p, l4, l4_proto, l4_len, class);
 }
 
 // GPL-compatible on purpose: bpf_sk_lookup_tcp() and the clock helpers are

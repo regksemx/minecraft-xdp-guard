@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use aya::maps::lpm_trie::{Key, LpmTrie};
+use aya::maps::lpm_trie::LpmTrie;
 use aya::maps::{HashMap, MapInfo};
 use aya::programs::links::{FdLink, PinnedLink};
 use aya::programs::xdp::{XdpLink, XdpLinkId};
@@ -9,7 +9,7 @@ use aya::programs::{Xdp, XdpMode};
 use aya::{Ebpf, EbpfLoader, include_bytes_aligned};
 use log::{info, warn};
 
-use crate::config::{AdoptMode, ChallengeMode, Config, ConfigXdpMode, Ipv4Net};
+use crate::config::{AdoptMode, ChallengeMode, Config, ConfigXdpMode, Ipv6Mode, split_families};
 use crate::deny;
 use crate::hosts;
 use crate::pong;
@@ -38,8 +38,14 @@ struct StateMap {
 /// The maps that are pinned while the loader runs: verified flows, what is
 /// known about source ips and the deny list. Pinning lets them outlive a
 /// restart and lets `xdp-loader deny` reach them. Sizes mirror xdp/common.h.
-fn state_maps(config: &Config) -> [StateMap; 6] {
+fn state_maps(config: &Config) -> [StateMap; 7] {
     [
+        StateMap {
+            name: "deny_v6",
+            key_size: 20,
+            value_size: 8,
+            max_entries: 65536,
+        },
         // connections in the middle of inspection: pinned so that a client
         // connecting right when the loader is replaced does not fail
         StateMap {
@@ -54,9 +60,9 @@ fn state_maps(config: &Config) -> [StateMap; 6] {
             value_size: 16,
             max_entries: config.xdp.max_pending_udp_sessions,
         },
-        // the capacity of the deny list is fixed in xdp/minecraft_filter.c
+        // the capacity of the deny lists is fixed in xdp/minecraft_filter.c
         StateMap {
-            name: deny::MAP_NAME,
+            name: "deny_v4",
             key_size: 8,
             value_size: 8,
             max_entries: 65536,
@@ -130,7 +136,7 @@ pub fn detach_interface(config: &Config, interface: &str) -> Result<bool> {
 pub fn remove_state(config: &Config, bans: bool) {
     let dir = state_dir(config);
     for map in state_maps(config) {
-        if map.name == deny::MAP_NAME && !bans {
+        if map.name.starts_with("deny_") && !bans {
             continue;
         }
         let path = dir.join(map.name);
@@ -262,7 +268,15 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
         .context("[java] hosts")?;
 
     let prometheus = config.metrics.enabled as u8;
-    let ipv6_protect = config.xdp.drop_ipv6 as u8;
+    // IPV6_PASS / IPV6_DROP / IPV6_INSPECT in xdp/common.h
+    let ipv6_mode: u8 = match config.xdp.ipv6 {
+        Ipv6Mode::Pass => 0,
+        Ipv6Mode::Drop => 1,
+        Ipv6Mode::Inspect => 2,
+    };
+    let flow6_seed = flow6_seed();
+    let (allow_v4, allow_v6) = split_families(&allow);
+    let (deny_v4, deny_v6) = split_families(&deny);
     let has_allow = !allow.is_empty() as u8;
     // always on: bans can be added while the filter runs. Looking up an
     // empty list costs next to nothing
@@ -351,7 +365,8 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
     let mut loader = EbpfLoader::new();
     loader
         .override_global("PROMETHEUS", &prometheus, true)
-        .override_global("IPV6_PROTECT", &ipv6_protect, true)
+        .override_global("IPV6_MODE", &ipv6_mode, true)
+        .override_global("FLOW6_SEED", &flow6_seed, true)
         .override_global("HAS_ALLOW", &has_allow, true)
         .override_global("HAS_DENY", &has_deny, true)
         .override_global("LIMIT_WINDOW_NS", &limit_window_ns, true)
@@ -419,11 +434,9 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
 
     // the lists have to be in place before the first packet is filtered
     fill_hosts(&mut ebpf, &allowed_hosts)?;
-    fill_list(&mut ebpf, "allow_v4", &allow)?;
-    let map = ebpf
-        .map_mut(deny::MAP_NAME)
-        .context("map 'deny_v4' not found")?;
-    let kept_bans = deny::sync_config(&mut LpmTrie::try_from(map)?, &deny)?;
+    fill_list(&mut ebpf, "allow_v4", &allow_v4)?;
+    fill_list(&mut ebpf, "allow_v6", &allow_v6)?;
+    let kept_bans = sync_deny(&mut ebpf, &deny_v4)? + sync_deny(&mut ebpf, &deny_v6)?;
     if kept_bans > 0 {
         info!("Deny list: {kept_bans} bans kept from before the restart");
     }
@@ -536,21 +549,42 @@ fn fill_hosts(ebpf: &mut Ebpf, hashes: &[u64]) -> Result<()> {
     Ok(())
 }
 
-fn fill_list(ebpf: &mut Ebpf, name: &str, nets: &[Ipv4Net]) -> Result<()> {
+/// Fills an allow list. Its keys are built like those of the deny list.
+fn fill_list<F: deny::Family>(ebpf: &mut Ebpf, name: &str, nets: &[F]) -> Result<()> {
     if nets.is_empty() {
         return Ok(());
     }
     let map = ebpf
         .map_mut(name)
         .with_context(|| format!("map '{name}' not found"))?;
-    let mut trie: LpmTrie<_, u32, u8> = LpmTrie::try_from(map)?;
+    let mut trie: LpmTrie<_, F::Addr, u8> = LpmTrie::try_from(map)?;
     for net in nets {
-        // the trie compares the key bytes front to back: network byte order
-        let key = Key::new(net.prefix_len, u32::from(net.addr).to_be());
-        trie.insert(&key, 1, 0)
+        trie.insert(&net.key(), 1, 0)
             .with_context(|| format!("failed to fill map '{name}'"))?;
     }
     Ok(())
+}
+
+/// Brings one deny map in line with the config; returns how many bans added
+/// at runtime it still holds.
+fn sync_deny<F: deny::Family>(ebpf: &mut Ebpf, nets: &[F]) -> Result<usize> {
+    let map = ebpf
+        .map_mut(F::MAP)
+        .with_context(|| format!("map '{}' not found", F::MAP))?;
+    deny::sync_config::<F, _>(&mut LpmTrie::try_from(map)?, nets)
+}
+
+/// Seed for hashing IPv6 addresses into the flow tables. It has to stay the
+/// same for as long as the pinned tables live (until reboot) and must not be
+/// known outside: the boot id of the kernel is both.
+fn flow6_seed() -> u64 {
+    match std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+        Ok(boot_id) => hosts::hash(boot_id.trim()),
+        Err(e) => {
+            warn!("Cannot read the boot id ({e}); IPv6 connections will not survive a restart of the loader");
+            random_seed()
+        }
+    }
 }
 
 /// One line per protection, so the log shows what is actually enforced.
@@ -599,6 +633,7 @@ fn log_protection(config: &Config, cpus: u32, adopt_mode: u8) {
             ports(udp_guard.start_port, udp_guard.end_port)
         );
     }
+    info!("IPv6 to the protected ports: {:?}", config.xdp.ipv6);
     let attack = &config.attack;
     info!(
         "Challenge: {:?} (table of {} slots, {} MiB); budgets are split over {cpus} cpus",

@@ -507,7 +507,8 @@ static void raknet_connect(__u32 ip, __u16 port)
 
 static void all_features(struct minecraft_filter *s)
 {
-    s->rodata->IPV6_PROTECT = 1;
+    s->rodata->IPV6_MODE = 2;
+    s->rodata->FLOW6_SEED = 0x0123456789ABCDEFULL;
     s->rodata->HAS_ALLOW = 1;
     s->rodata->HAS_DENY = 1;
     s->rodata->ADOPT_MODE = 1;
@@ -1465,7 +1466,7 @@ static void test_adopt_socket(void)
 
 static void with_ipv6(struct minecraft_filter *s)
 {
-    s->rodata->IPV6_PROTECT = 1;
+    s->rodata->IPV6_MODE = 1; // drop
 }
 
 static struct frame ipv6_frame(__u8 next_header, __u16 dst_port, int with_extension)
@@ -1511,6 +1512,333 @@ static void test_ipv6(void)
     // without the option IPv6 is none of the filter's business
     LOAD_OR_RETURN(NULL);
     PASSES(ipv6_frame(IPPROTO_TCP, JAVA_PORT, 0));
+}
+
+/* ------------------------------------------------------------------------
+ * IPv6 inspection
+ * --------------------------------------------------------------------- */
+
+struct addr6
+{
+    __u8 b[16];
+};
+
+// fd00:<prefix>::<host>
+static struct addr6 addr6(__u16 prefix, __u32 host)
+{
+    struct addr6 a = {{0xfd, 0x00, (__u8)(prefix >> 8), (__u8)prefix}};
+    a.b[12] = (__u8)(host >> 24);
+    a.b[13] = (__u8)(host >> 16);
+    a.b[14] = (__u8)(host >> 8);
+    a.b[15] = (__u8)host;
+    return a;
+}
+
+#define SERVER6 addr6(0, 1)
+#define CLIENT6 addr6(0x100, 1)
+
+// rewraps the transport part of an IPv4 frame into IPv6, behind
+// `extensions` destination option headers (8 bytes each)
+static struct frame to_v6_between(struct frame v4, struct addr6 src, struct addr6 dst, int extensions)
+{
+    const __u32 l4_offset = sizeof(struct ethhdr) + sizeof(struct iphdr);
+    const __u32 l4_len = v4.n - l4_offset;
+    const __u8 protocol = ((const struct iphdr *)(v4.b + sizeof(struct ethhdr)))->protocol;
+
+    struct frame f = {{0}, 0};
+    struct ethhdr *eth = (struct ethhdr *)f.b;
+    eth->h_proto = htons(ETH_P_IPV6);
+    struct ipv6hdr *ip6 = (struct ipv6hdr *)(eth + 1);
+    ip6->version = 6;
+    ip6->hop_limit = 64;
+    memcpy(&ip6->saddr, src.b, 16);
+    memcpy(&ip6->daddr, dst.b, 16);
+    ip6->payload_len = htons((__u16)(extensions * 8 + l4_len));
+    ip6->nexthdr = extensions ? IPPROTO_DSTOPTS : protocol;
+    __u8 *cursor = (__u8 *)(ip6 + 1);
+    for (int i = 0; i < extensions; i++)
+    {
+        cursor[0] = i == extensions - 1 ? protocol : IPPROTO_DSTOPTS;
+        cursor[1] = 0; // 8 bytes
+        cursor += 8;
+    }
+    memcpy(cursor, v4.b + l4_offset, l4_len);
+    f.n = (__u32)(cursor - f.b) + l4_len;
+    return f;
+}
+
+static struct frame to_v6(struct frame v4, struct addr6 src)
+{
+    return to_v6_between(v4, src, SERVER6, 0);
+}
+
+static struct frame tcp6(struct addr6 src, __u16 src_port, __u16 dst_port, __u32 seq, __u8 flags, const void *payload, __u32 len)
+{
+    return to_v6(tcp_to(0, src_port, dst_port, seq, flags, payload, len), src);
+}
+
+static struct frame udp6(struct addr6 src, __u16 src_port, __u16 dst_port, const void *payload, __u32 len)
+{
+    return to_v6(udp_to(0, src_port, dst_port, payload, len), src);
+}
+
+static void test_ipv6_drop_mode_chains(void)
+{
+    LOAD_OR_RETURN(with_ipv6);
+    const struct frame syn = tcp_to(0, 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0);
+    DROPS(to_v6_between(syn, CLIENT6, SERVER6, 0));
+    DROPS(to_v6_between(syn, CLIENT6, SERVER6, 4));
+    // hidden behind more extension headers than the filter walks
+    DROPS(to_v6_between(syn, CLIENT6, SERVER6, 5));
+    PASSES(to_v6_between(tcp_to(0, 5000, OTHER_PORT, 1000, TCP_SYN, NULL, 0), CLIENT6, SERVER6, 4));
+}
+
+static void with_ipv6_inspect(struct minecraft_filter *s)
+{
+    s->rodata->IPV6_MODE = 2;
+    s->rodata->FLOW6_SEED = 0x0123456789ABCDEFULL;
+}
+
+static void test_ipv6_inspect(void)
+{
+    LOAD_OR_RETURN(with_ipv6_inspect);
+    const struct bytes handshake = mc_handshake("mc.example.com", INTENT_LOGIN);
+    const struct bytes login = mc_login("Steve");
+    const struct bytes ocr1 = raknet_ocr1(11, 1464);
+    const struct bytes ocr2 = raknet_ocr2();
+    const struct bytes data = raknet_data();
+    const struct bytes ping = raknet_ping();
+    const struct bytes stun = stun_binding(72);
+    const struct bytes dtls = dtls_record();
+
+    // Java: the same sequence as over IPv4
+    PASSES(tcp6(CLIENT6, 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    DROPS(tcp6(CLIENT6, 5000, JAVA_PORT, 1001, TCP_ACK, NULL, 0));
+    PASSES(tcp6(CLIENT6, 5000, JAVA_PORT, 1001, TCP_ACK | TCP_PSH, handshake.b, handshake.n));
+    PASSES(tcp6(CLIENT6, 5000, JAVA_PORT, 1001 + handshake.n, TCP_ACK | TCP_PSH, login.b, login.n));
+    CHECK(stat(STAT_JAVA_VERIFIED) == 1);
+    PASSES(tcp6(CLIENT6, 5000, JAVA_PORT, 5555, TCP_ACK, "anything", 8));
+
+    // every other flow is unknown: another port, another host, another network
+    DROPS(tcp6(CLIENT6, 5001, JAVA_PORT, 5555, TCP_ACK, "anything", 8));
+    DROPS(tcp6(addr6(0x100, 2), 5000, JAVA_PORT, 5555, TCP_ACK, "anything", 8));
+    DROPS(tcp6(addr6(0x101, 1), 5000, JAVA_PORT, 5555, TCP_ACK, "anything", 8));
+    CHECK(stat(STAT_TCP_UNTRACKED) == 3);
+    // garbage instead of a handshake
+    PASSES(tcp6(CLIENT6, 5002, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    DROPS(tcp6(CLIENT6, 5002, JAVA_PORT, 1001, TCP_ACK | TCP_PSH, "GET / HTTP/1.1", 14));
+    DROPS(tcp6(CLIENT6, 5003, JAVA_PORT, 1000, TCP_SYN, "x", 1));
+    // payload length lying about the packet
+    struct frame lying = tcp6(CLIENT6, 5004, JAVA_PORT, 1000, TCP_SYN, NULL, 0);
+    ((struct ipv6hdr *)(lying.b + sizeof(struct ethhdr)))->payload_len = htons(4);
+    DROPS(lying);
+
+    // Bedrock, NetherNet, the generic guards
+    DROPS(udp6(CLIENT6, 6000, RAKNET_PORT, data.b, data.n));
+    PASSES(udp6(CLIENT6, 6000, RAKNET_PORT, ping.b, ping.n));
+    PASSES(udp6(CLIENT6, 6000, RAKNET_PORT, ocr1.b, ocr1.n));
+    PASSES(udp6(CLIENT6, 6000, RAKNET_PORT, ocr2.b, ocr2.n));
+    PASSES(udp6(CLIENT6, 6000, RAKNET_PORT, data.b, data.n));
+    DROPS(udp6(CLIENT6, 6001, RAKNET_PORT, data.b, data.n));
+    PASSES(udp6(CLIENT6, 7000, ICE_PORT, stun.b, stun.n));
+    PASSES(udp6(CLIENT6, 7000, ICE_PORT, dtls.b, dtls.n));
+    DROPS(udp6(CLIENT6, 7001, ICE_PORT, dtls.b, dtls.n));
+    __u8 voice[20] = {0xFF};
+    PASSES(udp6(CLIENT6, 8000, VOICE_PORT, voice, sizeof(voice)));
+    DROPS(udp6(CLIENT6, 8000, VOICE_PORT, "\x01 not a voice packet", 21));
+    tcp_handshake(CLIENT_IP, 5000, GUARD_PORT, 1000); // (IPv4, for comparison)
+    PASSES(tcp6(CLIENT6, 5005, GUARD_PORT, 1000, TCP_SYN, NULL, 0));
+    PASSES(tcp6(CLIENT6, 5005, GUARD_PORT, 1001, TCP_ACK | TCP_PSH, "GET /v1/join HTTP/1.1", 21));
+    CHECK(stat(STAT_GUARD_VERIFIED) == 1);
+
+    // other ports and protocols are none of the filter's business
+    PASSES(tcp6(CLIENT6, 5000, OTHER_PORT, 1, TCP_ACK, "x", 1));
+    PASSES(ipv6_frame(IPPROTO_ICMPV6, 0, 0));
+
+    // extension headers do not hide the flow: same connection with or without
+    const struct frame syn = tcp_to(0, 5006, JAVA_PORT, 1000, TCP_SYN, NULL, 0);
+    const struct frame hs = tcp_to(0, 5006, JAVA_PORT, 1001, TCP_ACK | TCP_PSH, handshake.b, handshake.n);
+    PASSES(to_v6_between(syn, CLIENT6, SERVER6, 2));
+    DROPS(to_v6_between(tcp_to(0, 5006, JAVA_PORT, 1001, TCP_ACK, NULL, 0), CLIENT6, SERVER6, 1));
+    PASSES(to_v6_between(hs, CLIENT6, SERVER6, 4));
+    // more headers than anybody sends: dropped unseen
+    DROPS(to_v6_between(syn, CLIENT6, SERVER6, 5));
+    DROPS(to_v6_between(tcp_to(0, 5006, OTHER_PORT, 1000, TCP_SYN, NULL, 0), CLIENT6, SERVER6, 5));
+
+    // first fragment for a protected port
+    struct frame fragment = to_v6_between(syn, addr6(0x100, 9), SERVER6, 1);
+    __u8 *header = fragment.b + sizeof(struct ethhdr) + sizeof(struct ipv6hdr);
+    ((struct ipv6hdr *)(fragment.b + sizeof(struct ethhdr)))->nexthdr = IPPROTO_FRAGMENT;
+    header[3] = 0x01; // offset 0, more fragments
+    DROPS(fragment);
+    CHECK(stat(STAT_FRAGMENT_DROPPED) == 1);
+    header[2] = 0x01; // not the first one: no ports to look at
+    PASSES(fragment);
+
+    // IPv4 keeps working next to it
+    java_login(CLIENT_IP, 5007, 1000, 1);
+}
+
+static void ipv6_limits(struct minecraft_filter *s)
+{
+    with_ipv6_inspect(s);
+    s->rodata->SYN_HITS = 3;
+    s->rodata->HAS_ALLOW = 1;
+    s->rodata->HAS_DENY = 1;
+}
+
+struct lpm_key6
+{
+    __u32 prefixlen;
+    __u8 addr[16];
+};
+
+static void test_ipv6_limits_and_lists(void)
+{
+    LOAD_OR_RETURN(ipv6_limits);
+
+    // the limits count per /64: three hosts of one network use it up ...
+    for (__u32 host = 1; host <= 3; host++)
+    {
+        PASSES(tcp6(addr6(0x200, host), 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    }
+    DROPS(tcp6(addr6(0x200, 4), 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    CHECK(stat(STAT_SYN_THROTTLED) == 1);
+    CHECK(stat(STAT_NEW_IP) == 1);
+    // ... which does not bother the network next door
+    PASSES(tcp6(addr6(0x201, 4), 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+
+    // deny: a whole /48, and a single address with a ban that is over
+    const __u64 forever = 0;
+    const __u64 past = monotonic_ns() - 1 * SEC;
+    struct lpm_key6 key = {48, {0xfd, 0x00, 0x03, 0x00}};
+    CHECK(bpf_map__update_elem(skel->maps.deny_v6, &key, sizeof(key), &forever, sizeof(forever), BPF_ANY) == 0);
+    key.prefixlen = 128;
+    memcpy(key.addr, addr6(0x400, 7).b, 16);
+    CHECK(bpf_map__update_elem(skel->maps.deny_v6, &key, sizeof(key), &past, sizeof(past), BPF_ANY) == 0);
+    DROPS(tcp6(addr6(0x300, 1), 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    DROPS(udp6(addr6(0x300, 2), 6000, RAKNET_PORT, "\x01", 1));
+    PASSES(tcp6(addr6(0x300, 1), 5000, OTHER_PORT, 1000, TCP_SYN, NULL, 0));
+    PASSES(tcp6(addr6(0x400, 7), 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    CHECK(stat(STAT_DENYLIST) == 2);
+
+    // allow: no inspection at all
+    const __u8 one = 1;
+    memcpy(key.addr, addr6(0x500, 1).b, 16);
+    CHECK(bpf_map__update_elem(skel->maps.allow_v6, &key, sizeof(key), &one, sizeof(one), BPF_ANY) == 0);
+    PASSES(tcp6(addr6(0x500, 1), 5000, JAVA_PORT, 2, TCP_ACK, "whatever", 8));
+    PASSES(udp6(addr6(0x500, 1), 6000, RAKNET_PORT, "whatever", 8));
+    DROPS(tcp6(addr6(0x500, 2), 5000, JAVA_PORT, 2, TCP_ACK, "whatever", 8));
+}
+
+// a ban reaches connections that are already verified within a second
+static void test_ban_cuts_open_flows(void)
+{
+    LOAD_OR_RETURN(ipv6_limits);
+    const struct bytes handshake = mc_handshake("h", INTENT_LOGIN);
+    const struct bytes login = mc_login("Steve");
+    const struct bytes data = raknet_data();
+    const struct addr6 player6 = addr6(0x600, 1);
+
+    const __u32 seq = java_login(CLIENT_IP, 5000, 1000, 1);
+    raknet_connect(CLIENT_IP, 6000);
+    PASSES(tcp6(player6, 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+    PASSES(tcp6(player6, 5000, JAVA_PORT, 1001, TCP_ACK | TCP_PSH, handshake.b, handshake.n));
+    PASSES(tcp6(player6, 5000, JAVA_PORT, 1001 + handshake.n, TCP_ACK | TCP_PSH, login.b, login.n));
+
+    const __u64 runtime = 1;
+    struct lpm_key key4 = {32, htonl(CLIENT_IP)};
+    CHECK(bpf_map__update_elem(skel->maps.deny_v4, &key4, sizeof(key4), &runtime, sizeof(runtime), BPF_ANY) == 0);
+    struct lpm_key6 key6 = {64, {0xfd, 0x00, 0x06, 0x00}};
+    CHECK(bpf_map__update_elem(skel->maps.deny_v6, &key6, sizeof(key6), &runtime, sizeof(runtime), BPF_ANY) == 0);
+
+    sleep_ms(1100);
+    DROPS(tcp_to(CLIENT_IP, 5000, JAVA_PORT, seq, TCP_ACK, NULL, 0));
+    DROPS(udp_to(CLIENT_IP, 6000, RAKNET_PORT, data.b, data.n));
+    DROPS(tcp6(player6, 5000, JAVA_PORT, 5555, TCP_ACK, NULL, 0));
+    // and stay cut after the ban is lifted: the connection is forgotten
+    CHECK(bpf_map__delete_elem(skel->maps.deny_v4, &key4, sizeof(key4), 0) == 0);
+    DROPS(tcp_to(CLIENT_IP, 5000, JAVA_PORT, seq, TCP_ACK, NULL, 0));
+    DROPS(udp_to(CLIENT_IP, 6000, RAKNET_PORT, data.b, data.n));
+    java_login(CLIENT_IP, 5001, 1000, 1);
+}
+
+static void ipv6_challenge(struct minecraft_filter *s)
+{
+    with_ipv6_inspect(s);
+    s->rodata->CHALLENGE_MODE = 2;
+    s->rodata->PONG_REPLY = 1;
+    s->rodata->PONG_MAX_AGE_NS = 60 * SEC;
+}
+
+static void test_ipv6_challenge(void)
+{
+    LOAD_OR_RETURN(ipv6_challenge);
+    const struct bytes ping = raknet_ping();
+    const struct frame syn = tcp6(CLIENT6, 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0);
+
+    DROPS(syn);
+    DROPS(udp6(addr6(0x101, 1), 6000, RAKNET_PORT, ping.b, ping.n));
+    sleep_ms(400);
+    PASSES(syn);
+    // the whole /64 is known now
+    PASSES(tcp6(addr6(0x100, 77), 5000, JAVA_PORT, 1000, TCP_SYN, NULL, 0));
+
+    // pings are answered from the cache over IPv4 only; over IPv6 the
+    // server answers
+    struct pong_value pong = {.updated = monotonic_ns(), .len = 8 + 16 + 2 + 5};
+    memcpy(pong.data + 8, RAKNET_MAGIC, 16);
+    memcpy(pong.data + 24, "\x00\x05MCPE;", 7);
+    __u32 zero = 0;
+    CHECK(bpf_map__update_elem(skel->maps.pong_cache, &zero, sizeof(zero), &pong, sizeof(pong), BPF_ANY) == 0);
+    struct frame out = {{0}, 0};
+    const struct frame ping6 = udp6(addr6(0x101, 1), 6000, RAKNET_PORT, ping.b, ping.n);
+    CHECK(run_out(ping6, &out) == XDP_PASS);
+    CHECK(out.n == ping6.n && memcmp(out.b, ping6.b, ping6.n) == 0);
+}
+
+static void ipv6_adopt(struct minecraft_filter *s)
+{
+    with_ipv6_inspect(s);
+    s->rodata->ADOPT_MODE = 1;
+    s->rodata->ADOPT_UNTIL_NS = monotonic_ns() + 30 * SEC;
+}
+
+static void test_ipv6_adopt_socket(void)
+{
+    LOAD_OR_RETURN(ipv6_adopt);
+
+    // a real connection over the IPv6 loopback, to the protected port
+    const int listener = socket(AF_INET6, SOCK_STREAM, 0);
+    const int one = 1;
+    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    struct sockaddr_in6 server = {.sin6_family = AF_INET6, .sin6_port = htons(JAVA_PORT), .sin6_addr = IN6ADDR_LOOPBACK_INIT};
+    if (bind(listener, (struct sockaddr *)&server, sizeof(server)) != 0)
+    {
+        printf("note: no IPv6 loopback here, skipping the IPv6 adoption test\n");
+        close(listener);
+        return;
+    }
+    CHECK(listen(listener, 8) == 0);
+    const int client = socket(AF_INET6, SOCK_STREAM, 0);
+    CHECK(connect(client, (struct sockaddr *)&server, sizeof(server)) == 0);
+    const int accepted = accept(listener, NULL, NULL);
+    struct sockaddr_in6 local = {0};
+    socklen_t local_len = sizeof(local);
+    getsockname(client, (struct sockaddr *)&local, &local_len);
+    const __u16 client_port = ntohs(local.sin6_port);
+
+    struct addr6 loopback = {{0}};
+    loopback.b[15] = 1;
+    PASSES(to_v6_between(tcp_to(0, client_port, JAVA_PORT, 1, TCP_ACK, "data", 4), loopback, loopback, 0));
+    CHECK(stat(STAT_TCP_ADOPTED) == 1);
+    DROPS(to_v6_between(tcp_to(0, (__u16)(client_port ^ 1), JAVA_PORT, 1, TCP_ACK, "data", 4), loopback, loopback, 0));
+    DROPS(tcp6(CLIENT6, 5000, JAVA_PORT, 1, TCP_ACK, "data", 4));
+    CHECK(stat(STAT_TCP_ADOPTED) == 1);
+
+    close(accepted);
+    close(client);
+    close(listener);
 }
 
 static void test_vlan(void)
@@ -1647,6 +1975,12 @@ int main(int argc, char **argv)
     test_adopt_blind();
     test_adopt_socket();
     test_ipv6();
+    test_ipv6_drop_mode_chains();
+    test_ipv6_inspect();
+    test_ipv6_limits_and_lists();
+    test_ban_cuts_open_flows();
+    test_ipv6_challenge();
+    test_ipv6_adopt_socket();
     test_vlan();
     unload();
 

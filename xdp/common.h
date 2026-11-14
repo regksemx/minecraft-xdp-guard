@@ -75,6 +75,26 @@ enum connection_state
         (ptr) += (n);                                     \
     } while (0)
 
+/*
+ * Skips a number of bytes that was read from the packet and range-checked
+ * by the caller before.
+ *
+ * The verifier has to know the bound of what is added to the cursor, but it
+ * loses a range check whenever the compiler keeps the checked value in a
+ * different register or on the stack. Masking a copy the compiler can not
+ * see through gives the verifier a bound that always survives. `mask` has to
+ * cover the checked maximum, so it changes nothing for any value that passed
+ * the check.
+ */
+#define SKIP_CHECKED_OR_RETURN(ptr, len, mask, pend, dend)  \
+    do                                                      \
+    {                                                       \
+        __u32 _skip = (__u32)(len);                         \
+        barrier_var(_skip);                                 \
+        _skip &= (mask);                                    \
+        SKIP_OR_RETURN(ptr, _skip, pend, dend);             \
+    } while (0)
+
 // reads a fixed-size value into dest and advances ptr past it
 #define READ_VAL_OR_RETURN(dest, ptr, pend, dend)               \
     do                                                          \
@@ -247,6 +267,19 @@ struct lpm_v4_key
     __u32 addr; // network byte order
 };
 _Static_assert(sizeof(struct lpm_v4_key) == 8, "lpm_v4_key size mismatch!");
+
+// IPv6 key of the allow/deny LPM tries
+struct lpm_v6_key
+{
+    __u32 prefixlen;
+    __u8 addr[16];
+};
+_Static_assert(sizeof(struct lpm_v6_key) == 20, "lpm_v6_key size mismatch!");
+
+// what happens to IPv6 packets aimed at a protected port (IPV6_MODE)
+#define IPV6_PASS 0    // not looked at
+#define IPV6_DROP 1    // dropped, so IPv6 is no way around the filter
+#define IPV6_INSPECT 2 // inspected like IPv4
 
 /*
  * Retransmit challenge table: every slot of the retry_table array holds two

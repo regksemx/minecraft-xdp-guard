@@ -121,10 +121,17 @@ def echo_client(conn):
         conn.close()
 
 
+def dual_stack(kind, port):
+    """A socket that serves IPv4 and IPv6 on the same port."""
+    sock = socket.socket(socket.AF_INET6, kind)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    sock.bind(("::", port))
+    return sock
+
+
 def tcp_server(port, handler):
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", port))
+    listener = dual_stack(socket.SOCK_STREAM, port)
     listener.listen(128)
     while True:
         conn, _ = listener.accept()
@@ -132,13 +139,12 @@ def tcp_server(port, handler):
 
 
 def raknet_server(port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", port))
+    sock = dual_stack(socket.SOCK_DGRAM, port)
     while True:
         data, addr = sock.recvfrom(2048)
         kind = data[0]
         if kind in (0x01, 0x02):
-            events.write(f"raknet ping {addr[0]}\n")
+            events.write(f"raknet ping {addr[0].removeprefix('::ffff:')}\n")
             sock.sendto(b"\x1c" + data[1:9] + bytes(8) + MAGIC + b"\x00\x05MCPE;", addr)
         elif kind == 0x05:
             sock.sendto(b"\x06" + MAGIC + bytes(8) + b"\x00\x05\xd4", addr)
@@ -149,8 +155,7 @@ def raknet_server(port):
 
 
 def udp_echo(port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", port))
+    sock = dual_stack(socket.SOCK_DGRAM, port)
     while True:
         data, addr = sock.recvfrom(2048)
         sock.sendto(data, addr)

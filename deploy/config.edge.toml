@@ -76,8 +76,9 @@ deny = []
 
 [xdp]
 mode = "auto"
-# true if the services also listen on IPv6
-drop_ipv6 = true
+# "inspect" if players may connect over IPv6; "drop" keeps IPv6 from being a
+# way around the filter if they do not
+ipv6 = "drop"
 keep_state = true
 # "socket" if the proxy listens on this host itself; "blind" if the ports
 # are forwarded into a container or to another machine (DNAT)

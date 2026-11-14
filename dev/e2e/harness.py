@@ -11,6 +11,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRV, CLI = "mcxdp-srv", "mcxdp-cli"
 SERVER_IP, CLIENT_IP, NEWCOMER_IP = "10.99.0.1", "10.99.0.2", "10.99.0.3"
+SERVER_IP6, CLIENT_IP6 = "fd99::1", "fd99::2"
 STATE_DIR = "/sys/fs/bpf/mcxdp-e2e"
 
 failures = 0
@@ -130,8 +131,8 @@ class Loader:
 class Client:
     """A client.py process in the client namespace, driven line by line."""
 
-    def __init__(self, source=CLIENT_IP):
-        self.process = in_ns(CLI, [sys.executable, os.path.join(HERE, "client.py"), source],
+    def __init__(self, source=CLIENT_IP, server=SERVER_IP):
+        self.process = in_ns(CLI, [sys.executable, os.path.join(HERE, "client.py"), source, server],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     def ask(self, command):
@@ -166,6 +167,9 @@ def setup():
     sh(f"ip -n {SRV} addr add {SERVER_IP}/24 dev veth-srv")
     sh(f"ip -n {CLI} addr add {CLIENT_IP}/24 dev veth-cli")
     sh(f"ip -n {CLI} addr add {NEWCOMER_IP}/24 dev veth-cli")
+    # nodad: usable at once, without waiting for duplicate address detection
+    sh(f"ip -n {SRV} addr add {SERVER_IP6}/64 dev veth-srv nodad")
+    sh(f"ip -n {CLI} addr add {CLIENT_IP6}/64 dev veth-cli nodad")
     for ns, dev in ((SRV, "veth-srv"), (CLI, "veth-cli")):
         sh(f"ip -n {ns} link set lo up")
         sh(f"ip -n {ns} link set {dev} up")

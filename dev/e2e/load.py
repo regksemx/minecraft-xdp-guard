@@ -59,6 +59,7 @@ good_after_secs = 2
 
 [xdp]
 mode = "skb"
+ipv6 = "inspect"
 keep_state = false
 state_dir = "{state_dir}"
 adopt = "off"
