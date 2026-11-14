@@ -12,6 +12,7 @@ use log::{info, warn};
 use crate::config::{AdoptMode, ChallengeMode, Config, ConfigXdpMode, Ipv4Net};
 use crate::deny;
 use crate::hosts;
+use crate::pong;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
@@ -303,6 +304,8 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
     let raknet_ocr1_min = bedrock.open_request_min_size;
     let ping_hits = limits.pings_per_ip;
     let ping_budget = per_cpu(attack.ping_budget, cpus);
+    let pong_reply = !bedrock.pong_from.is_empty() as u8;
+    let pong_max_age_ns = pong::max_age_secs(config) * NSEC_PER_SEC;
 
     let ice_start_port = u32::from(config.nethernet.ice_start_port);
     let ice_end_port = u32::from(config.nethernet.ice_end_port);
@@ -378,6 +381,8 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
         .override_global("RAKNET_OCR1_MIN", &raknet_ocr1_min, true)
         .override_global("PING_HITS", &ping_hits, true)
         .override_global("PING_BUDGET", &ping_budget, true)
+        .override_global("PONG_REPLY", &pong_reply, true)
+        .override_global("PONG_MAX_AGE_NS", &pong_max_age_ns, true)
         .override_global("ICE_START_PORT", &ice_start_port, true)
         .override_global("ICE_END_PORT", &ice_end_port, true)
         .override_global("UDPGUARD_START_PORT", &udpguard_start_port, true)

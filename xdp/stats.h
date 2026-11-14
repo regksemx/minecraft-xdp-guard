@@ -65,6 +65,7 @@ enum stat_id
 
     STAT_UDPGUARD_VERIFIED, // generic UDP guard sessions opened
     STAT_UDPGUARD_INVALID,  // datagrams with the wrong first byte or size
+    STAT_RAKNET_PONG,       // unconnected pings answered by the filter itself
 
     STAT_COUNT
 };

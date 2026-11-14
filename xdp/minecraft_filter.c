@@ -178,6 +178,15 @@ struct
     __type(value, __u64);
 } deny_v4 SEC(".maps");
 
+// the server's answer to an unconnected ping, see struct pong_cache
+struct
+{
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct pong_cache);
+} pong_cache SEC(".maps");
+
 // hashes of the host names players may connect with (see hash_host)
 struct
 {
@@ -199,6 +208,7 @@ struct packet
     struct statistics *stats; // NULL unless PROMETHEUS
     __u64 now;                // coarse monotonic clock, one read per packet
     __u64 len;                // frame length, for the byte counters
+    __u32 l3_offset;          // offset of the IPv4 header inside the frame
     struct ipv4_flow_key flow;
 };
 
@@ -911,6 +921,97 @@ update_state:
  * UDP: Bedrock RakNet and NetherNet ICE
  * --------------------------------------------------------------------- */
 
+#define RAKNET_UNCONNECTED_PONG 0x1c
+#define PONG_HEADER_LEN 9 // id, echoed ping time
+
+static __always_inline __u16 ipv4_header_checksum(const struct iphdr *ip)
+{
+    const __u16 *words = (const __u16 *)ip;
+    __u32 sum = 0;
+    for (__u32 i = 0; i < sizeof(*ip) / 2; i++)
+    {
+        sum += words[i];
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    sum = (sum & 0xFFFF) + (sum >> 16);
+    return (__u16)~sum;
+}
+
+/*
+ * Turns an unconnected ping into the server's pong and sends it straight
+ * back out of the interface, so server list pings never reach the server.
+ * Returns XDP_PASS (let the server answer) whenever the cached pong can not
+ * be used.
+ */
+static __always_inline __u32 answer_ping(const struct packet *p, const struct iphdr *ip, const __u8 *payload, const __u32 payload_len)
+{
+    __u32 zero = 0;
+    const struct pong_cache *pong = bpf_map_lookup_elem(&pong_cache, &zero);
+    if (!pong)
+    {
+        return XDP_PASS;
+    }
+    __u32 pong_len = pong->len;
+    barrier_var(pong_len);
+    if (pong_len < PONG_MIN || pong_len > PONG_MAX || elapsed(p->now, pong->updated) > PONG_MAX_AGE_NS || ip->ihl != 5)
+    {
+        return XDP_PASS;
+    }
+    if ((const void *)(payload + PONG_HEADER_LEN) > p->data_end)
+    {
+        return XDP_PASS;
+    }
+    const __u64 ping_time = *(const __u64 *)(payload + 1);
+
+    // resize the frame to the pong; all packet pointers are stale afterwards
+    const __s32 delta = (__s32)(PONG_HEADER_LEN + pong_len) - (__s32)payload_len;
+    if (bpf_xdp_adjust_tail(p->ctx, delta))
+    {
+        return XDP_PASS;
+    }
+    void *data = (void *)(long)p->ctx->data;
+    const void *data_end = (const void *)(long)p->ctx->data_end;
+    const __u32 l3_offset = p->l3_offset & 0x3F;
+
+    struct ethhdr *eth = data;
+    struct iphdr *reply_ip = data + l3_offset;
+    struct udphdr *reply_udp = (struct udphdr *)(reply_ip + 1);
+    __u8 *reply = (__u8 *)(reply_udp + 1);
+    if ((const void *)(eth + 1) > data_end || (const void *)(reply + PONG_HEADER_LEN) > data_end)
+    {
+        return XDP_DROP;
+    }
+
+    // back to where it came from
+    __u8 mac[ETH_ALEN];
+    __builtin_memcpy(mac, eth->h_dest, ETH_ALEN);
+    __builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+    __builtin_memcpy(eth->h_source, mac, ETH_ALEN);
+
+    const __be32 client_ip = reply_ip->saddr;
+    reply_ip->saddr = reply_ip->daddr;
+    reply_ip->daddr = client_ip;
+    reply_ip->tot_len = bpf_htons((__u16)(sizeof(*reply_ip) + sizeof(*reply_udp) + PONG_HEADER_LEN + pong_len));
+    reply_ip->ttl = 64;
+    reply_ip->check = 0;
+    reply_ip->check = ipv4_header_checksum(reply_ip);
+
+    const __be16 client_port = reply_udp->source;
+    reply_udp->source = reply_udp->dest;
+    reply_udp->dest = client_port;
+    reply_udp->len = bpf_htons((__u16)(sizeof(*reply_udp) + PONG_HEADER_LEN + pong_len));
+    reply_udp->check = 0; // optional over IPv4
+
+    reply[0] = RAKNET_UNCONNECTED_PONG;
+    *(__u64 *)(reply + 1) = ping_time;
+    if (bpf_xdp_store_bytes(p->ctx, l3_offset + sizeof(*reply_ip) + sizeof(*reply_udp) + PONG_HEADER_LEN, (void *)pong->data, pong_len))
+    {
+        return XDP_DROP;
+    }
+    count_stat(p->stats, STAT_RAKNET_PONG, 1);
+    return XDP_TX;
+}
+
 // counts why an opener was refused
 static __always_inline void count_udp_refusal(const struct packet *p, const __u32 admitted, const enum stat_id throttled)
 {
@@ -924,7 +1025,7 @@ static __always_inline void count_udp_refusal(const struct packet *p, const __u3
     }
 }
 
-static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *udp, const __u32 class)
+static __always_inline __u32 handle_udp(struct packet *p, const struct iphdr *ip, const struct udphdr *udp, const __u32 class)
 {
     const __u8 ice = class == PORT_ICE;
     const __u8 guard = class == PORT_UDP_GUARD;
@@ -1058,6 +1159,10 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
             goto drop;
         }
         count_stat(p->stats, STAT_RAKNET_PING, 1);
+        if (PONG_REPLY)
+        {
+            return answer_ping(p, ip, payload, udp_len - sizeof(struct udphdr));
+        }
         return XDP_PASS;
     }
 
@@ -1237,6 +1342,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
 
     __be16 l3_proto = eth->h_proto;
     const void *l3 = eth + 1;
+    __u32 l3_offset = sizeof(*eth);
 
     // up to two VLAN tags (the NIC usually strips them, but not always)
     if (l3_proto == bpf_htons(ETH_P_8021Q) || l3_proto == bpf_htons(ETH_P_8021AD))
@@ -1248,6 +1354,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         }
         l3_proto = tag->encapsulated_proto;
         l3 = tag + 1;
+        l3_offset += sizeof(*tag);
         if (l3_proto == bpf_htons(ETH_P_8021Q))
         {
             tag = l3;
@@ -1257,6 +1364,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
             }
             l3_proto = tag->encapsulated_proto;
             l3 = tag + 1;
+            l3_offset += sizeof(*tag);
         }
     }
 
@@ -1324,6 +1432,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         .stats = NULL,
         .now = bpf_ktime_get_coarse_ns(),
         .len = (__u64)(data_end - data),
+        .l3_offset = l3_offset,
         .flow = {
             .src_ip = ip->saddr,
             .dst_ip = ip->daddr,
@@ -1359,7 +1468,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
 
     if (l4_proto == IPPROTO_UDP)
     {
-        return handle_udp(&p, udp, class);
+        return handle_udp(&p, ip, udp, class);
     }
 
     const struct tcphdr *tcp = l4;

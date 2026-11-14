@@ -138,8 +138,11 @@ def syn_burst(port, count):
 
 
 def rak_ping(attempts="1"):
-    reply = udp_exchange(new_udp(), 19132, b"\x01" + bytes(8) + MAGIC + bytes(8), int(attempts))
-    return "ok" if reply[0] == 0x1C else "bad reply"
+    sent_at = time.time_ns().to_bytes(8, "big")
+    reply = udp_exchange(new_udp(), 19132, b"\x01" + sent_at + MAGIC + bytes(8), int(attempts))
+    # id, our time echoed, server guid, magic, MOTD
+    valid = reply[0] == 0x1C and reply[1:9] == sent_at and reply[17:33] == MAGIC and reply.endswith(b"MCPE;")
+    return "ok" if valid else "bad reply"
 
 
 def rak_connect(attempts="1"):

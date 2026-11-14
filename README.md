@@ -36,6 +36,9 @@ protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
 - **Budgets and proven players**: caps on logins, status requests, pings and
   new sessions per second. IPs that played for a few minutes are exempt, so
   regular players keep getting in while bots fight over the budget.
+- **Bedrock pings answered by the filter**: the loader keeps the server's
+  pong in a map and the filter replies from it, so server list pings and
+  ping floods never reach the server.
 - **Packet rate limit** per verified connection.
 - **Allow and deny lists** (IPv4 networks). Bans can be added while the
   filter runs, with a lifetime, and cut the banned address off immediately.
@@ -134,6 +137,8 @@ A port range with `start_port = 0` switches that protection off.
 | `start_port`, `end_port` | 0 | Inclusive port range, usually 19132. |
 | `raknet_protocol_min`, `raknet_protocol_max` | 9, 11 | Accepted RakNet protocol versions. |
 | `open_request_min_size` | 400 | Minimum size of OpenConnectionRequest1 (clients pad it to the MTU). |
+| `pong_from` | `""` | Address of the real server, e.g. `127.0.0.1:19132`. The filter then answers server list pings itself with that server's last pong; pings never reach the server. Needs kernel 5.18. |
+| `pong_refresh_secs` | 5 | How often the loader fetches the pong. |
 
 **`[nethernet]`** — NetherNet WebRTC data channels (UDP)
 

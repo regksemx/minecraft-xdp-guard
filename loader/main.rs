@@ -4,6 +4,7 @@ mod ebpf;
 mod hosts;
 mod logging;
 mod metrics;
+mod pong;
 mod shutdown;
 
 use std::path::Path;
@@ -183,16 +184,20 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
     result
 }
 
-/// Publishes metrics until shutdown is triggered.
+/// Publishes metrics and refreshes the pong cache until shutdown is
+/// triggered.
 fn serve(filter: &mut ebpf::Filter, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
     let stats_thread = metrics::start(&mut filter.ebpf, config, shutdown)?;
+    let pong_thread = pong::start(&mut filter.ebpf, config, shutdown)?;
 
     shutdown.wait();
 
-    if let Some(handle) = stats_thread {
-        handle
-            .join()
-            .map_err(|e| anyhow::anyhow!("track-stats thread panicked: {e:?}"))?;
+    for (name, handle) in [("track-stats", stats_thread), ("pong-refresh", pong_thread)] {
+        if let Some(handle) = handle {
+            handle
+                .join()
+                .map_err(|e| anyhow::anyhow!("{name} thread panicked: {e:?}"))?;
+        }
     }
     Ok(())
 }

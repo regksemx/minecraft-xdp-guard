@@ -138,6 +138,7 @@ def raknet_server(port):
         data, addr = sock.recvfrom(2048)
         kind = data[0]
         if kind in (0x01, 0x02):
+            events.write(f"raknet ping {addr[0]}\n")
             sock.sendto(b"\x1c" + data[1:9] + bytes(8) + MAGIC + b"\x00\x05MCPE;", addr)
         elif kind == 0x05:
             sock.sendto(b"\x06" + MAGIC + bytes(8) + b"\x00\x05\xd4", addr)

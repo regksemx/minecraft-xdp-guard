@@ -218,6 +218,23 @@ struct cpu_state
 };
 _Static_assert(sizeof(struct cpu_state) == 40, "cpu_state size mismatch!");
 
+/*
+ * The answer to a RakNet unconnected ping, kept fresh by the loader (it
+ * pings the real server every few seconds). `data` is the pong after its
+ * first 9 bytes (id and the echoed ping time): server guid, magic, MOTD.
+ */
+#define PONG_MAX 512
+#define PONG_MIN (8 + 16 + 2) // guid, magic, length of an empty MOTD
+
+struct pong_cache
+{
+    __u64 updated; // ktime of the last refresh
+    __u32 len;     // bytes used in data
+    __u32 pad;
+    __u8 data[PONG_MAX];
+};
+_Static_assert(sizeof(struct pong_cache) == 16 + PONG_MAX, "pong_cache size mismatch!");
+
 // values of deny_v4 that mark a ban without an end; every other value is
 // the ktime at which the ban expires
 #define DENY_CONFIG 0  // listed in the config file, replaced on every start

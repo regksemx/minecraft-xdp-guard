@@ -28,6 +28,8 @@ end_port = 19132
 [bedrock]
 start_port = 19132
 end_port = 19132
+pong_from = "{pong_from}"
+pong_refresh_secs = 1
 
 [nethernet]
 ice_start_port = 27020
@@ -70,7 +72,7 @@ level = "info"
 """
 
 
-DEFAULTS = {"challenge": "auto", "adopt": "off", "syn_per_ip": 100, "allow": [], "deny": []}
+DEFAULTS = {"challenge": "auto", "adopt": "off", "syn_per_ip": 100, "allow": [], "deny": [], "pong_from": ""}
 
 
 def main():
@@ -258,6 +260,25 @@ def main():
     loader.stop()
     loader.start(**DEFAULTS)
     client.expect("rak_ping", "ok")
+
+    # ---- phase 6b: the filter answers Bedrock pings itself -----------------
+    client.expect("rak_ping", "ok")
+    pings_at_server = events().count("raknet ping 10.99.0.2")
+    check("without the cache pings reach the server", pings_at_server > 0)
+    loader.stop()
+    loader.start(**{**DEFAULTS, "pong_from": "127.0.0.1:19132"})
+    time.sleep(0.5)                                                    # first refresh
+    check("the loader fetched the pong", "Answering Bedrock pings" in loader.output(), loader.output())
+    for _ in range(5):
+        client.expect("rak_ping", "ok")                                # echoed time and MOTD are checked
+    check("pings of players no longer reach the server", events().count("raknet ping 10.99.0.2") == pings_at_server)
+    check("the loader keeps asking the server", events().count("raknet ping 127.0.0.1") >= 1)
+    raknet = client.expect("rak_connect", "ok")                        # connecting is not affected
+    client.expect(f"rak_data {raknet}", "ok")
+    time.sleep(1.5)
+    check("metrics: pongs from the filter", loader.metric("minecraft_raknet_pongs") == 5)
+    loader.stop()
+    loader.start(**DEFAULTS)
 
     # ---- phase 7: replacing the loader without a gap ---------------------
     java = client.expect("java_login Steve mc.e2e.test", "ok")

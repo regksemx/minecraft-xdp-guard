@@ -215,6 +215,25 @@ static int run(struct frame frame)
     return (int)opts.retval;
 }
 
+// like run(), but also returns the frame the program left behind
+static int run_out(struct frame frame, struct frame *out)
+{
+    LIBBPF_OPTS(bpf_test_run_opts, opts,
+                .data_in = frame.b,
+                .data_size_in = frame.n,
+                .data_out = out->b,
+                .data_size_out = sizeof(out->b),
+                .repeat = 1);
+    const int err = bpf_prog_test_run_opts(bpf_program__fd(skel->progs.minecraft_filter), &opts);
+    if (err)
+    {
+        printf("FAIL: BPF_PROG_TEST_RUN: %s\n", strerror(-err));
+        return -1;
+    }
+    out->n = opts.data_size_out;
+    return (int)opts.retval;
+}
+
 #define TCP_FIN 0x01
 #define TCP_SYN 0x02
 #define TCP_RST 0x04
@@ -511,6 +530,8 @@ static void all_features(struct minecraft_filter *s)
     s->rodata->CHALLENGE_PPS = 100;
     s->rodata->GOOD_AFTER_NS = 120 * SEC;
     s->rodata->GOOD_TTL_NS = 86400 * SEC;
+    s->rodata->PONG_REPLY = 1;
+    s->rodata->PONG_MAX_AGE_NS = 20 * SEC;
 }
 
 static void all_features_always(struct minecraft_filter *s)
@@ -1142,6 +1163,119 @@ static void test_ice(void)
     DROPS(udp_to(CLIENT_IP, 7002, ICE_PORT, bad.b, 10));
 }
 
+static void with_pong_reply(struct minecraft_filter *s)
+{
+    s->rodata->PONG_REPLY = 1;
+    s->rodata->PONG_MAX_AGE_NS = 1500 * MS;
+    s->rodata->PING_HITS = 3;
+}
+
+struct pong_value
+{
+    __u64 updated;
+    __u32 len;
+    __u32 pad;
+    __u8 data[512];
+};
+
+static __u16 checksum16(const __u8 *bytes, __u32 len)
+{
+    __u32 sum = 0;
+    for (__u32 i = 0; i < len; i += 2)
+    {
+        sum += (__u32)bytes[i] << 8 | bytes[i + 1];
+    }
+    while (sum >> 16)
+    {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (__u16)~sum;
+}
+
+static void test_pong_from_cache(void)
+{
+    LOAD_OR_RETURN(with_pong_reply);
+    struct bytes ping = raknet_ping();
+    memcpy(ping.b + 1, "\x01\x02\x03\x04\x05\x06\x07\x08", 8); // ping time
+    struct frame in = udp_to(CLIENT_IP, 6000, RAKNET_PORT, ping.b, ping.n);
+    memcpy(in.b, "\xaa\xaa\xaa\xaa\xaa\xaa\xbb\xbb\xbb\xbb\xbb\xbb", 12); // dst mac, src mac
+    struct frame out = {{0}, 0};
+
+    // nothing cached yet: the server has to answer
+    CHECK(run_out(in, &out) == XDP_PASS);
+    CHECK(out.n == in.n && memcmp(out.b, in.b, in.n) == 0);
+
+    // what the server answers: guid, magic, MOTD
+    const char *motd = "MCPE;A Bedrock server;800;1.21.50;12;100;1234567890;world;Survival;1;19132;19133;";
+    struct pong_value pong = {.updated = monotonic_ns(), .len = 8 + 16 + 2 + (__u32)strlen(motd)};
+    memcpy(pong.data, "\x11\x22\x33\x44\x55\x66\x77\x88", 8);
+    memcpy(pong.data + 8, RAKNET_MAGIC, 16);
+    pong.data[24] = (__u8)(strlen(motd) >> 8);
+    pong.data[25] = (__u8)strlen(motd);
+    memcpy(pong.data + 26, motd, strlen(motd));
+    __u32 zero = 0;
+    CHECK(bpf_map__update_elem(skel->maps.pong_cache, &zero, sizeof(zero), &pong, sizeof(pong), BPF_ANY) == 0);
+
+    CHECK(run_out(in, &out) == XDP_TX);
+    const __u32 headers = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct udphdr);
+    CHECK(out.n == headers + 9 + pong.len);
+    const struct iphdr *ip = (const struct iphdr *)(out.b + sizeof(struct ethhdr));
+    const struct udphdr *udp = (const struct udphdr *)(ip + 1);
+    const __u8 *reply = (const __u8 *)(udp + 1);
+    // addressed back to the client
+    CHECK(memcmp(out.b, "\xbb\xbb\xbb\xbb\xbb\xbb\xaa\xaa\xaa\xaa\xaa\xaa", 12) == 0);
+    CHECK(ntohl(ip->saddr) == SERVER_IP && ntohl(ip->daddr) == CLIENT_IP);
+    CHECK(ntohs(udp->source) == RAKNET_PORT && ntohs(udp->dest) == 6000);
+    // consistent lengths and a valid ip checksum
+    CHECK(ntohs(ip->tot_len) == out.n - sizeof(struct ethhdr));
+    CHECK(ntohs(udp->len) == out.n - sizeof(struct ethhdr) - sizeof(struct iphdr));
+    CHECK(checksum16((const __u8 *)ip, sizeof(*ip)) == 0);
+    CHECK(udp->check == 0);
+    // the pong: id, the time of this ping, then the server's answer
+    CHECK(reply[0] == 0x1c);
+    CHECK(memcmp(reply + 1, "\x01\x02\x03\x04\x05\x06\x07\x08", 8) == 0);
+    CHECK(memcmp(reply + 9, pong.data, pong.len) == 0);
+    CHECK(stat(STAT_RAKNET_PONG) == 1);
+
+    // behind a VLAN tag the answer keeps the tag
+    struct frame tagged = {{0}, in.n + 4};
+    memcpy(tagged.b, in.b, 12);
+    memcpy(tagged.b + 12, "\x81\x00\x00\x64", 4);
+    memcpy(tagged.b + 16, in.b + 12, in.n - 12);
+    CHECK(run_out(tagged, &out) == XDP_TX);
+    CHECK(out.n == headers + 4 + 9 + pong.len);
+    CHECK(memcmp(out.b + 12, "\x81\x00\x00\x64\x08\x00", 6) == 0);
+    CHECK(out.b[headers + 4] == 0x1c);
+    CHECK(memcmp(out.b + headers + 4 + 9, pong.data, pong.len) == 0);
+
+    // the limits still come first: 3 pings per ip and window, all used
+    CHECK(run_out(in, &out) == XDP_DROP);
+    CHECK(stat(STAT_PING_THROTTLED) == 1);
+
+    // a pong the loader stopped refreshing is not used anymore
+    sleep_ms(1700);
+    CHECK(run_out(in, &out) == XDP_PASS);
+    CHECK(out.n == in.n && memcmp(out.b, in.b, in.n) == 0);
+
+    // neither is one with a nonsense length
+    pong.updated = monotonic_ns();
+    pong.len = 513;
+    CHECK(bpf_map__update_elem(skel->maps.pong_cache, &zero, sizeof(zero), &pong, sizeof(pong), BPF_ANY) == 0);
+    CHECK(run_out(in, &out) == XDP_PASS);
+    pong.len = 10;
+    CHECK(bpf_map__update_elem(skel->maps.pong_cache, &zero, sizeof(zero), &pong, sizeof(pong), BPF_ANY) == 0);
+    CHECK(run_out(udp_to(CLIENT_IP + 1, 6000, RAKNET_PORT, ping.b, ping.n), &out) == XDP_PASS);
+    CHECK(stat(STAT_RAKNET_PONG) == 2);
+
+    // the largest pong that fits the cache
+    pong.len = 512;
+    memset(pong.data + 26, 'x', 512 - 26);
+    CHECK(bpf_map__update_elem(skel->maps.pong_cache, &zero, sizeof(zero), &pong, sizeof(pong), BPF_ANY) == 0);
+    CHECK(run_out(udp_to(CLIENT_IP + 2, 6000, RAKNET_PORT, ping.b, ping.n), &out) == XDP_TX);
+    CHECK(out.n == headers + 9 + 512);
+    CHECK(out.b[out.n - 1] == 'x');
+}
+
 static void udp_guard_limits(struct minecraft_filter *s)
 {
     s->rodata->UDP_OPEN_HITS = 2;
@@ -1506,6 +1640,7 @@ int main(int argc, char **argv)
     test_guard();
     test_guard_tls_only();
     test_raknet();
+    test_pong_from_cache();
     test_ice();
     test_udp_guard();
     test_lists();

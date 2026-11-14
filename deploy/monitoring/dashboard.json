@@ -527,6 +527,15 @@
             "type": "prometheus",
             "uid": "${datasource}"
           }
+        },
+        {
+          "refId": "T7",
+          "expr": "sum(rate(minecraft_raknet_pongs{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "bedrock pings answered by the filter",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
         }
       ]
     },

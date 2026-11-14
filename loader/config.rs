@@ -63,6 +63,15 @@ raknet_protocol_max = 11
 # they probe (at least 548 bytes); floods usually send it bare.
 open_request_min_size = 400
 
+# Answer server list pings from the filter itself. The loader asks the real
+# server at this address every pong_refresh_secs seconds, and the filter
+# replies to players with that answer, so pings (and ping floods) never
+# reach the server; the player count in the list is at most that old. Use an
+# address the loader can reach without passing the filter, e.g.
+# "127.0.0.1:19132". Needs kernel 5.18. Empty = off.
+pong_from = ""
+pong_refresh_secs = 5
+
 [nethernet]
 # NetherNet / WebRTC data channels of Bedrock (UDP). A session has to open
 # with a STUN binding request; afterwards only STUN and DTLS are accepted.
@@ -320,6 +329,11 @@ pub struct BedrockConfig {
     pub raknet_protocol_max: u8,
     /// Minimum size of OpenConnectionRequest1. Maps to `RAKNET_OCR1_MIN`.
     pub open_request_min_size: u32,
+    /// Address of the real server whose pong the filter replays, empty =
+    /// off. Sets `PONG_REPLY`.
+    pub pong_from: String,
+    /// Seconds between refreshes of that pong. Sets `PONG_MAX_AGE_NS`.
+    pub pong_refresh_secs: u64,
 }
 
 impl Default for BedrockConfig {
@@ -330,6 +344,8 @@ impl Default for BedrockConfig {
             raknet_protocol_min: 9,
             raknet_protocol_max: 11,
             open_request_min_size: 400,
+            pong_from: String::new(),
+            pong_refresh_secs: 5,
         }
     }
 }
@@ -848,7 +864,16 @@ impl BedrockConfig {
             self.open_request_min_size as u64,
             0,
             1464,
-        )
+        )?;
+        if !self.pong_from.is_empty() {
+            if self.start_port == 0 {
+                bail!("[bedrock] pong_from is set but the Bedrock ports are switched off");
+            }
+            self.pong_from
+                .parse::<std::net::SocketAddr>()
+                .with_context(|| format!("[bedrock] pong_from: '{}' is not an address like 127.0.0.1:19132", self.pong_from))?;
+        }
+        check_range("[bedrock] pong_refresh_secs", self.pong_refresh_secs, 1, 60)
     }
 }
 
@@ -1017,6 +1042,9 @@ mod tests {
             "[java]\nprotocol_min = -1",
             "[bedrock]\nraknet_protocol_min = 12",
             "[bedrock]\nopen_request_min_size = 1500",
+            "[bedrock]\npong_from = \"127.0.0.1:19132\"",
+            "[bedrock]\nstart_port = 19132\nend_port = 19132\npong_from = \"localhost\"",
+            "[bedrock]\nstart_port = 19132\nend_port = 19132\npong_refresh_secs = 0",
             "[udp_guard]\nfirst_byte = 256",
             "[udp_guard]\nfirst_byte = -2",
             "[udp_guard]\nmin_size = 0",

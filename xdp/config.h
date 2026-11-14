@@ -67,6 +67,8 @@ volatile const __u32 RAKNET_PROTO_MAX = 0;
 volatile const __u32 RAKNET_OCR1_MIN = 0;  // minimum UDP payload of OpenConnectionRequest1 (clients pad it to the MTU)
 volatile const __u32 PING_HITS = 0;        // unconnected pings per ip
 volatile const __u32 PING_BUDGET = 0;      // unconnected pings per cpu
+volatile const __u8 PONG_REPLY = 0;        // answer unconnected pings from pong_cache
+volatile const __u64 PONG_MAX_AGE_NS = 0;  // a cached pong older than this is not used
 
 /* --- NetherNet WebRTC (UDP ICE: STUN + DTLS) -------------------------- */
 volatile const __u32 ICE_START_PORT = 0;   // 0 = off
