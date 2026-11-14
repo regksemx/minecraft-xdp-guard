@@ -1,0 +1,687 @@
+{
+  "title": "Minecraft XDP filter",
+  "uid": "minecraft-xdp",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "tags": [
+    "minecraft",
+    "xdp"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Datasource"
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "label": "Instance",
+        "includeAll": true,
+        "multi": true,
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(minecraft_incoming_packets, instance)",
+          "refId": "instance"
+        },
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Packets to protected ports",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(minecraft_incoming_packets{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "incoming",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(minecraft_dropped_packets{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "dropped",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Traffic to protected ports",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(minecraft_incoming_bytes{instance=~\"$instance\"}[$__rate_interval])) * 8",
+          "legendFormat": "incoming",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(minecraft_dropped_bytes{instance=~\"$instance\"}[$__rate_interval])) * 8",
+          "legendFormat": "dropped",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Why packets are dropped",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 10
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(minecraft_challenge_dropped{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "retransmit challenge",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(minecraft_tcp_untracked{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "unknown tcp connection",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(minecraft_udp_untracked{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "unknown udp session",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(minecraft_syn_throttled{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "syn per ip",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(minecraft_tcp_budget_dropped{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "tcp budget",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "F",
+          "expr": "sum(rate(minecraft_udp_budget_dropped{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "udp budget",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "G",
+          "expr": "sum(rate(minecraft_status_throttled{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "status per ip",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "H",
+          "expr": "sum(rate(minecraft_raknet_pings_throttled{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "ping per ip",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "I",
+          "expr": "sum(rate(minecraft_udp_sessions_throttled{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "sessions per ip",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "J",
+          "expr": "sum(rate(minecraft_invalid_packets{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "invalid java",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "K",
+          "expr": "sum(rate(minecraft_bad_host{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "bad host",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "L",
+          "expr": "sum(rate(minecraft_bad_protocol{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "bad protocol",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "M",
+          "expr": "sum(rate(minecraft_raknet_invalid{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "invalid raknet",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "N",
+          "expr": "sum(rate(minecraft_ice_invalid{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "invalid ice",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "O",
+          "expr": "sum(rate(minecraft_guard_invalid{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "invalid guard",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "P",
+          "expr": "sum(rate(minecraft_tcp_bypass{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "tcp flags",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "Q",
+          "expr": "sum(rate(minecraft_tcp_rate_limited{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "tcp flow rate",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "R",
+          "expr": "sum(rate(minecraft_udp_rate_limited{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "udp flow rate",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "S",
+          "expr": "sum(rate(minecraft_denylist_dropped{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "deny list",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "T",
+          "expr": "sum(rate(minecraft_ipv6_dropped{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "ipv6",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "U",
+          "expr": "sum(rate(minecraft_fragments_dropped{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "fragments",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "V",
+          "expr": "sum(rate(minecraft_malformed{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "malformed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "What gets through (per second)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(minecraft_verified_connections{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "java logins",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(minecraft_status_requests{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "java status",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(minecraft_raknet_verified{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "bedrock sessions",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(minecraft_raknet_pings{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "bedrock pings",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(minecraft_ice_verified{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "nethernet sessions",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "F",
+          "expr": "sum(rate(minecraft_guard_verified{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "guard connections",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "New connections (per second)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(minecraft_syn_packets{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "syn",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(minecraft_raknet_open_requests{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "bedrock open requests",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(minecraft_new_ips{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "new ips",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(minecraft_challenge_passed{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "challenge passed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "sum(rate(minecraft_good_ips{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "proven players",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Adopted after start / table errors",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 5,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(minecraft_tcp_adopted{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "tcp adopted",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(minecraft_udp_adopted{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "udp adopted",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(minecraft_allowlist_passed{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "allow list passed",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(minecraft_table_full{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "failed inserts",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    }
+  ]
+}

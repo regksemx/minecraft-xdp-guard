@@ -1,0 +1,6 @@
+# Scrape job for vmagent / Prometheus on the machine that runs the filter.
+# Needs [metrics] enabled = true and addr = "127.0.0.1:1999" in config.toml.
+- job_name: minecraft-xdp
+  scrape_interval: 15s
+  static_configs:
+    - targets: ["127.0.0.1:1999"]

@@ -1,0 +1,70 @@
+# Alert rules for vmalert / Prometheus. All counters are minecraft_* totals
+# published by the loader, see loader/metrics.rs.
+groups:
+  - name: minecraft-xdp
+    interval: 30s
+    rules:
+      - alert: XdpLoaderDown
+        expr: up{job="minecraft-xdp"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "XDP loader on {{ $labels.instance }} is not running"
+          description: >-
+            The filter itself stays attached when the loader dies, but nobody
+            restarts it with a new configuration and there are no metrics.
+
+      - alert: XdpFlood
+        expr: sum by (instance) (rate(minecraft_dropped_packets[1m])) > 5000
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "Flood on {{ $labels.instance }}: {{ $value | humanize }} packets/s dropped"
+
+      - alert: XdpBudgetExhausted
+        expr: >-
+          sum by (instance) (rate(minecraft_tcp_budget_dropped[5m]) + rate(minecraft_udp_budget_dropped[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Budgets on {{ $labels.instance }} are exhausted"
+          description: >-
+            More logins, status requests, pings or sessions arrive than the
+            budgets in [attack] allow. During an attack that is the point;
+            without one the budgets are too small and new players are refused.
+
+      - alert: XdpNoLoginsPass
+        expr: >-
+          sum by (instance) (rate(minecraft_syn_packets[5m])) > 5
+          and sum by (instance) (rate(minecraft_verified_connections[5m])) == 0
+          and sum by (instance) (rate(minecraft_status_requests[5m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Connections arrive on {{ $labels.instance }} but none passes the filter"
+          description: >-
+            Either everything that arrives is an attack, or the filter rejects
+            real players (host list, protocol range, a client the inspection
+            does not understand). `systemctl stop minecraft-xdp` takes it out.
+
+      - alert: XdpBadHosts
+        expr: sum by (instance) (rate(minecraft_bad_host[10m])) > 1
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Handshakes for hosts that are not allowed on {{ $labels.instance }}"
+          description: >-
+            Scanners cause a trickle of these. A steady stream after a DNS
+            change means a name players use is missing in [java] hosts.
+
+      - alert: XdpTableFull
+        expr: sum by (instance) (increase(minecraft_table_full[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A table of the XDP filter on {{ $labels.instance }} rejected inserts"

@@ -200,7 +200,8 @@ log watcher.
 
 **`[metrics]`** — `enabled`, `addr` (e.g. `127.0.0.1:1999`, serves `/metrics`),
 `poll_secs`. With metrics enabled the log also reports floods: what is being
-dropped and why.
+dropped and why. [`deploy/monitoring`](deploy/monitoring) has a scrape job,
+alert rules for vmalert / Prometheus and a Grafana dashboard.
 
 **`[logging]`** — `level`, `file_max_mb`.
 
