@@ -14,7 +14,8 @@ an attack mode built for small machines.
 | Bedrock (RakNet) | UDP | OpenConnectionRequest 1 and 2 from the same address |
 | NetherNet data channels | UDP | STUN binding request first, then only STUN and DTLS |
 | Generic TCP guard (NetherNet signaling) | TCP | TCP handshake, then a TLS ClientHello or an HTTP request |
-| Generic UDP guard (voice chat) | UDP | nothing: every datagram needs a minimum size and optionally a fixed first byte, the limits do the rest |
+| Simple Voice Chat | UDP | the frame of its packets: magic byte, connection id, a payload length that matches the datagram; a session is bound to its connection id |
+| Generic UDP guard | UDP | nothing: every datagram needs a minimum size and optionally a fixed first byte, the limits do the rest |
 
 Everything else aimed at a protected port is dropped. IPv6 is either ignored,
 dropped for the protected ports, or inspected by the same rules as IPv4
@@ -149,7 +150,20 @@ A port range with `start_port = 0` switches that protection off.
 |--------|---------|-------------|
 | `ice_start_port`, `ice_end_port` | 0 | Inclusive port range of the ICE candidates. |
 
-**`[udp_guard]`** — other UDP services, e.g. a voice chat
+**`[voice]`** — [Simple Voice Chat](https://github.com/henkelmax/simple-voice-chat) (UDP)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `start_port`, `end_port` | 0 | Inclusive port range, 24454 unless the voice chat is configured otherwise. |
+| `flow_pps` | 200 | Packets per second of one voice session (a talking client sends 50). 0 = unlimited. |
+| `allow_pings` | true | Pass the unauthenticated ping of external tools (limited by `pings_per_ip`). |
+
+Voice packets are encrypted, so the filter checks their frame and binds each
+session to the connection id that opened it; another id from the same address
+is a new session, limited by `udp_sessions_per_ip`, `udp_session_budget` and
+the challenge. Written against mod 2.7 (also the packets of 2.5 and 2.6).
+
+**`[udp_guard]`** — other UDP services
 
 | Option | Default | Description |
 |--------|---------|-------------|

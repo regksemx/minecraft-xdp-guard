@@ -36,6 +36,7 @@ static volatile __u32 UDPGUARD_MIN_LEN = 17;
 #include "../varint.h"
 #include "../protocol.h"
 #include "../bedrock.h"
+#include "../voice.h"
 
 /* ------------------------------------------------------------------------
  * Tiny test framework
@@ -80,7 +81,7 @@ static __u32 write_varint(__u8 *out, __s32 value)
 
 struct buf
 {
-    __u8 b[2048];
+    __u8 b[4096];
     __u32 n;
 };
 
@@ -1065,6 +1066,119 @@ static void test_udp_guard(void)
 }
 
 /* ------------------------------------------------------------------------
+ * Simple Voice Chat
+ * --------------------------------------------------------------------- */
+
+static struct buf build_voice(__u8 uuid_fill, __u32 payload_len)
+{
+    struct buf pkt = {{0}, 0};
+    put_u8(&pkt, 0xFF);
+    put_fill(&pkt, uuid_fill, 16);
+    put_varint(&pkt, (__s32)payload_len);
+    put_fill(&pkt, 0x5A, payload_len);
+    return pkt;
+}
+
+static __u16 last_voice_connection = 0;
+
+static __u32 run_voice(const struct buf *pkt, __u32 len, __u32 slack)
+{
+    __u8 *heap = heap_copy(pkt->b, len, slack);
+    last_voice_connection = 0;
+    const __u32 kind = inspect_voice(heap, heap + len, heap + len + slack, &last_voice_connection);
+    free(heap);
+    return kind;
+}
+
+static void test_voice_packets(void)
+{
+    // authenticate / keep-alive: nothing but IV, packet type and tag
+    struct buf auth = build_voice(0xA1, VOICE_PAYLOAD_MIN);
+    CHECK(auth.n == 47);
+    CHECK(run_voice(&auth, auth.n, 0) == VOICE_DATA);
+    CHECK(run_voice(&auth, auth.n, 25) == VOICE_DATA);
+    const __u16 connection = last_voice_connection;
+
+    // every truncation and every extra byte breaks the frame
+    for (__u32 len = 0; len < auth.n; len++)
+    {
+        CHECK(run_voice(&auth, len, 0) == VOICE_INVALID);
+        CHECK(run_voice(&auth, len, 60) == VOICE_INVALID);
+    }
+    struct buf padded = auth;
+    put_u8(&padded, 0);
+    CHECK(run_voice(&padded, padded.n, 0) == VOICE_INVALID);
+
+    // audio: one and two length bytes, up to the maximum
+    const __u32 sizes[] = {30, 127, 128, 200, 1315, VOICE_PAYLOAD_MAX};
+    for (__u32 i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++)
+    {
+        struct buf mic = build_voice(0xA1, sizes[i]);
+        CHECK(run_voice(&mic, mic.n, 0) == VOICE_DATA);
+        // the digest belongs to the connection id, not to the packet
+        CHECK(last_voice_connection == connection);
+        CHECK(run_voice(&mic, mic.n - 1, 0) == VOICE_INVALID);
+    }
+    struct buf other = build_voice(0xB2, VOICE_PAYLOAD_MIN);
+    CHECK(run_voice(&other, other.n, 0) == VOICE_DATA);
+    CHECK(last_voice_connection != connection);
+
+    // payload sizes no client produces
+    struct buf small = build_voice(0xA1, VOICE_PAYLOAD_MIN - 1);
+    CHECK(run_voice(&small, small.n, 0) == VOICE_INVALID);
+    struct buf empty = build_voice(0xA1, 0);
+    CHECK(run_voice(&empty, empty.n, 0) == VOICE_INVALID);
+    struct buf huge = {{0}, 0};
+    put_u8(&huge, 0xFF);
+    put_fill(&huge, 0xA1, 16);
+    put_varint(&huge, VOICE_PAYLOAD_MAX + 1);
+    CHECK(run_voice(&huge, huge.n, 0) == VOICE_INVALID);
+
+    // wrong magic
+    struct buf magic = build_voice(0xA1, VOICE_PAYLOAD_MIN);
+    magic.b[0] = 0xFE;
+    CHECK(run_voice(&magic, magic.n, 0) == VOICE_INVALID);
+
+    // a length written with more bytes than needed, or with three bytes
+    struct buf overlong = {{0}, 0};
+    put_u8(&overlong, 0xFF);
+    put_fill(&overlong, 0xA1, 16);
+    put_u8(&overlong, 0x80 | VOICE_PAYLOAD_MIN);
+    put_u8(&overlong, 0x00);
+    put_fill(&overlong, 0x5A, VOICE_PAYLOAD_MIN);
+    CHECK(run_voice(&overlong, overlong.n, 0) == VOICE_INVALID);
+    struct buf three = {{0}, 0};
+    put_u8(&three, 0xFF);
+    put_fill(&three, 0xA1, 16);
+    put_u8(&three, 0x80);
+    put_u8(&three, 0x80);
+    put_u8(&three, 0x01);
+    put_fill(&three, 0x5A, 100);
+    CHECK(run_voice(&three, three.n, 0) == VOICE_INVALID);
+
+    // the unauthenticated ping: its uuid and exactly 24 bytes
+    const __u8 ping_uuid[16] = {0x58, 0xbc, 0x9a, 0xe9, 0xc7, 0xa8, 0x45, 0xe4,
+                                0xa1, 0x1c, 0xef, 0xbb, 0x67, 0x19, 0x94, 0x25};
+    struct buf ping = {{0}, 0};
+    put_u8(&ping, 0xFF);
+    put_bytes(&ping, ping_uuid, 16);
+    put_varint(&ping, VOICE_PING_PAYLOAD);
+    put_fill(&ping, 0x33, VOICE_PING_PAYLOAD);
+    CHECK(ping.n == 42);
+    CHECK(run_voice(&ping, ping.n, 0) == VOICE_PING);
+    CHECK(run_voice(&ping, ping.n - 1, 0) == VOICE_INVALID);
+    struct buf long_ping = {{0}, 0};
+    put_u8(&long_ping, 0xFF);
+    put_bytes(&long_ping, ping_uuid, 16);
+    put_varint(&long_ping, VOICE_PAYLOAD_MIN);
+    put_fill(&long_ping, 0x33, VOICE_PAYLOAD_MIN);
+    CHECK(run_voice(&long_ping, long_ping.n, 0) == VOICE_INVALID);
+    // 24 bytes are too few for anything encrypted
+    struct buf short_data = build_voice(0xA1, VOICE_PING_PAYLOAD);
+    CHECK(run_voice(&short_data, short_data.n, 0) == VOICE_INVALID);
+}
+
+/* ------------------------------------------------------------------------
  * Retransmit challenge table
  * --------------------------------------------------------------------- */
 
@@ -1164,6 +1278,7 @@ int main(void)
     test_stun_binding();
     test_guard_data();
     test_udp_guard();
+    test_voice_packets();
     test_retry_table();
 
     printf("%u checks, %u failures\n", checks_run, checks_failed);

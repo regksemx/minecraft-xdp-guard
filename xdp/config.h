@@ -75,7 +75,13 @@ volatile const __u64 PONG_MAX_AGE_NS = 0;  // a cached pong older than this is n
 volatile const __u32 ICE_START_PORT = 0;   // 0 = off
 volatile const __u32 ICE_END_PORT = 0;
 
-/* --- generic UDP guard (e.g. voice chat) -------------------------------- */
+/* --- Simple Voice Chat (UDP) -------------------------------------------- */
+volatile const __u32 VOICE_START_PORT = 0;  // 0 = off
+volatile const __u32 VOICE_END_PORT = 0;
+volatile const __u32 VOICE_FLOW_PPS = 0;    // packets per second of one voice session, 0 = unlimited
+volatile const __u8 VOICE_PINGS = 0;        // let the unauthenticated ping of external tools through
+
+/* --- generic UDP guard --------------------------------------------------- */
 volatile const __u32 UDPGUARD_START_PORT = 0; // 0 = off
 volatile const __u32 UDPGUARD_END_PORT = 0;
 volatile const __u32 UDPGUARD_FIRST_BYTE = 0; // every datagram has to start with this byte, 256 = any

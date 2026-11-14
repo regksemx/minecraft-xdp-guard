@@ -77,6 +77,7 @@ static __u64 monotonic_ns(void)
 #define GUARD_PORT 19132  // NetherNet signaling shares its number with RakNet
 #define RAKNET_PORT 19132
 #define ICE_PORT 27020
+#define UDPGUARD_PORT 24500
 #define VOICE_PORT 24454
 #define OTHER_PORT 22
 
@@ -115,8 +116,12 @@ static void base_config(struct minecraft_filter *s)
     s->rodata->ICE_END_PORT = ICE_PORT + 9;
     s->rodata->UDP_IDLE_NS = 30 * SEC;
 
-    s->rodata->UDPGUARD_START_PORT = VOICE_PORT;
-    s->rodata->UDPGUARD_END_PORT = VOICE_PORT;
+    s->rodata->VOICE_START_PORT = VOICE_PORT;
+    s->rodata->VOICE_END_PORT = VOICE_PORT;
+    s->rodata->VOICE_PINGS = 1;
+
+    s->rodata->UDPGUARD_START_PORT = UDPGUARD_PORT;
+    s->rodata->UDPGUARD_END_PORT = UDPGUARD_PORT;
     s->rodata->UDPGUARD_FIRST_BYTE = 0xFF;
     s->rodata->UDPGUARD_MIN_LEN = 17;
 
@@ -1296,38 +1301,38 @@ static void test_udp_guard(void)
     voice[0] = 0xFF;
 
     // the first acceptable datagram opens the session
-    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, sizeof(voice)));
     CHECK(stat(STAT_UDPGUARD_VERIFIED) == 1);
-    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, 17));
+    PASSES(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, 17));
     // wrong first byte or too short: dropped even inside a session
-    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, 16));
-    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, "\x01 raknet ping or whatever", 27));
-    DROPS(udp_to(CLIENT_IP, 8001, VOICE_PORT, "\x16 dtls or whatever......", 27));
+    DROPS(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, 16));
+    DROPS(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, "\x01 raknet ping or whatever", 27));
+    DROPS(udp_to(CLIENT_IP, 8001, UDPGUARD_PORT, "\x16 dtls or whatever......", 27));
     CHECK(stat(STAT_UDPGUARD_INVALID) == 3);
 
     // packet rate of one session: 4 per second, 2 are used
-    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
-    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
-    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, sizeof(voice)));
+    DROPS(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, sizeof(voice)));
     CHECK(stat(STAT_UDP_RATE_LIMITED) == 1);
 
     // new sessions per ip: 2 per window, one is used
-    PASSES(udp_to(CLIENT_IP, 8001, VOICE_PORT, voice, sizeof(voice)));
-    DROPS(udp_to(CLIENT_IP, 8002, VOICE_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP, 8001, UDPGUARD_PORT, voice, sizeof(voice)));
+    DROPS(udp_to(CLIENT_IP, 8002, UDPGUARD_PORT, voice, sizeof(voice)));
     CHECK(stat(STAT_UDP_OPEN_THROTTLED) == 1);
-    PASSES(udp_to(CLIENT_IP + 1, 8002, VOICE_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP + 1, 8002, UDPGUARD_PORT, voice, sizeof(voice)));
 
     // without a fixed first byte only the size counts
     LOAD_OR_RETURN(udp_guard_any_byte);
-    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, "any first byte will do here", 27));
-    DROPS(udp_to(CLIENT_IP, 8001, VOICE_PORT, "too short", 9));
+    PASSES(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, "any first byte will do here", 27));
+    DROPS(udp_to(CLIENT_IP, 8001, UDPGUARD_PORT, "too short", 9));
 
     // unknown ips are challenged like everywhere else
     LOAD_OR_RETURN(with_challenge_always);
-    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, sizeof(voice)));
+    DROPS(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, sizeof(voice)));
     sleep_ms(400);
-    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, voice, 30)); // any later datagram of the socket
-    PASSES(udp_to(CLIENT_IP, 8001, VOICE_PORT, voice, sizeof(voice)));
+    PASSES(udp_to(CLIENT_IP, 8000, UDPGUARD_PORT, voice, 30)); // any later datagram of the socket
+    PASSES(udp_to(CLIENT_IP, 8001, UDPGUARD_PORT, voice, sizeof(voice)));
 }
 
 static void with_lists(struct minecraft_filter *s)
@@ -1644,8 +1649,8 @@ static void test_ipv6_inspect(void)
     PASSES(udp6(CLIENT6, 7000, ICE_PORT, dtls.b, dtls.n));
     DROPS(udp6(CLIENT6, 7001, ICE_PORT, dtls.b, dtls.n));
     __u8 voice[20] = {0xFF};
-    PASSES(udp6(CLIENT6, 8000, VOICE_PORT, voice, sizeof(voice)));
-    DROPS(udp6(CLIENT6, 8000, VOICE_PORT, "\x01 not a voice packet", 21));
+    PASSES(udp6(CLIENT6, 8000, UDPGUARD_PORT, voice, sizeof(voice)));
+    DROPS(udp6(CLIENT6, 8000, UDPGUARD_PORT, "\x01 not a voice packet", 21));
     tcp_handshake(CLIENT_IP, 5000, GUARD_PORT, 1000); // (IPv4, for comparison)
     PASSES(tcp6(CLIENT6, 5005, GUARD_PORT, 1000, TCP_SYN, NULL, 0));
     PASSES(tcp6(CLIENT6, 5005, GUARD_PORT, 1001, TCP_ACK | TCP_PSH, "GET /v1/join HTTP/1.1", 21));
@@ -1841,6 +1846,134 @@ static void test_ipv6_adopt_socket(void)
     close(listener);
 }
 
+// a Simple Voice Chat datagram: magic, connection id, payload length, payload
+static struct bytes voice_packet(__u8 connection, __u32 payload_len)
+{
+    struct bytes pkt = {{0xFF}, 1};
+    for (int i = 0; i < 16; i++)
+    {
+        put_u8(&pkt, connection);
+    }
+    put_varint(&pkt, (__s32)payload_len);
+    for (__u32 i = 0; i < payload_len; i++)
+    {
+        put_u8(&pkt, (__u8)(i * 7 + connection)); // stands in for ciphertext
+    }
+    return pkt;
+}
+
+#define VOICE_AUTH 29 // IV, packet type, tag: authenticate and keep-alive
+#define VOICE_MIC 120 // a typical frame of audio
+
+static struct bytes voice_ping(void)
+{
+    struct bytes pkt = {{0xFF, 0x58, 0xbc, 0x9a, 0xe9, 0xc7, 0xa8, 0x45, 0xe4,
+                         0xa1, 0x1c, 0xef, 0xbb, 0x67, 0x19, 0x94, 0x25, 24}, 18};
+    pkt.n += 24; // ping id and timestamp
+    return pkt;
+}
+
+static void voice_limits(struct minecraft_filter *s)
+{
+    s->rodata->UDP_OPEN_HITS = 3;
+    s->rodata->PING_HITS = 2;
+    s->rodata->VOICE_FLOW_PPS = 6;
+}
+
+static void test_voice(void)
+{
+    LOAD_OR_RETURN(voice_limits);
+    const struct bytes auth = voice_packet(0xA1, VOICE_AUTH);
+    const struct bytes mic = voice_packet(0xA1, VOICE_MIC);
+    const struct bytes large = voice_packet(0xA1, 1315); // the largest audio frame, two length bytes
+
+    // the first well-formed packet opens the session
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, auth.b, auth.n));
+    CHECK(stat(STAT_VOICE_VERIFIED) == 1);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n));
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, large.b, large.n));
+
+    // not voice chat: wrong magic, a length that does not match the
+    // datagram, a payload too short to be encrypted, trailing bytes
+    struct bytes bad = voice_packet(0xA1, VOICE_MIC);
+    bad.b[0] = 0xFE;
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, bad.b, bad.n));
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n - 1));
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n + 1));
+    bad = voice_packet(0xA1, 28);
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, bad.b, bad.n));
+    bad = raknet_ping();
+    DROPS(udp_to(CLIENT_IP, 8001, VOICE_PORT, bad.b, bad.n));
+    DROPS(udp_to(CLIENT_IP, 8001, VOICE_PORT, "\xff", 1));
+    CHECK(stat(STAT_VOICE_INVALID) == 6);
+    CHECK(stat(STAT_VOICE_VERIFIED) == 1);
+
+    // packet rate of one session: 6 per second, 3 are used
+    for (int i = 0; i < 3; i++)
+    {
+        PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n));
+    }
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n));
+    CHECK(stat(STAT_UDP_RATE_LIMITED) == 1);
+
+    // a session is bound to its connection id: every other id from the
+    // same address has to open a session of its own, 3 per ip and window
+    sleep_ms(1100);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n));
+    const struct bytes other = voice_packet(0xB2, VOICE_MIC);
+    const struct bytes third = voice_packet(0xC3, VOICE_MIC);
+    const struct bytes fourth = voice_packet(0xD4, VOICE_MIC);
+    const struct bytes fifth = voice_packet(0xE5, VOICE_MIC);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, other.b, other.n));
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, other.b, other.n));
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, third.b, third.n));
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, fourth.b, fourth.n));
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, fifth.b, fifth.n));
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, mic.b, mic.n)); // the first id lost the address
+    CHECK(stat(STAT_VOICE_VERIFIED) == 4);
+    CHECK(stat(STAT_UDP_OPEN_THROTTLED) == 2);
+    PASSES(udp_to(CLIENT_IP + 1, 8000, VOICE_PORT, fifth.b, fifth.n)); // other ips are not affected
+
+    // the ping of external tools: no session, limited per ip
+    const struct bytes ping = voice_ping();
+    PASSES(udp_to(CLIENT_IP + 2, 8000, VOICE_PORT, ping.b, ping.n));
+    PASSES(udp_to(CLIENT_IP + 2, 8000, VOICE_PORT, ping.b, ping.n));
+    DROPS(udp_to(CLIENT_IP + 2, 8000, VOICE_PORT, ping.b, ping.n));
+    CHECK(stat(STAT_VOICE_PING) == 2);
+    CHECK(stat(STAT_PING_THROTTLED) == 1);
+    CHECK(stat(STAT_VOICE_VERIFIED) == 5); // a ping opens nothing
+    // the ping id with any other length is nothing the server would answer
+    struct bytes long_ping = voice_ping();
+    long_ping.b[17] = 29;
+    long_ping.n += 5;
+    DROPS(udp_to(CLIENT_IP + 3, 8000, VOICE_PORT, long_ping.b, long_ping.n));
+
+    // over IPv6 and behind the challenge like everything else
+    LOAD_OR_RETURN(ipv6_challenge);
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, auth.b, auth.n));
+    DROPS(udp6(CLIENT6, 8000, VOICE_PORT, auth.b, auth.n));
+    sleep_ms(400);
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, auth.b, auth.n)); // the client repeats its authentication
+    PASSES(udp6(CLIENT6, 8000, VOICE_PORT, auth.b, auth.n));
+    PASSES(udp6(CLIENT6, 8000, VOICE_PORT, mic.b, mic.n));
+    DROPS(udp6(CLIENT6, 8000, VOICE_PORT, mic.b, mic.n - 1));
+}
+
+static void voice_without_pings(struct minecraft_filter *s)
+{
+    s->rodata->VOICE_PINGS = 0;
+}
+
+static void test_voice_without_pings(void)
+{
+    LOAD_OR_RETURN(voice_without_pings);
+    const struct bytes ping = voice_ping();
+    const struct bytes auth = voice_packet(0xA1, VOICE_AUTH);
+    DROPS(udp_to(CLIENT_IP, 8000, VOICE_PORT, ping.b, ping.n));
+    PASSES(udp_to(CLIENT_IP, 8000, VOICE_PORT, auth.b, auth.n));
+    CHECK(stat(STAT_VOICE_INVALID) == 1);
+}
+
 static void test_vlan(void)
 {
     LOAD_OR_RETURN(NULL);
@@ -1981,6 +2114,8 @@ int main(int argc, char **argv)
     test_ban_cuts_open_flows();
     test_ipv6_challenge();
     test_ipv6_adopt_socket();
+    test_voice();
+    test_voice_without_pings();
     test_vlan();
     unload();
 

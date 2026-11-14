@@ -88,6 +88,10 @@ statistics! {
     UdpguardVerified   => "minecraft_udp_guard_verified", "UDP guard sessions opened";
     UdpguardInvalid    => "minecraft_udp_guard_invalid", "UDP guard datagrams with the wrong first byte or size";
     RaknetPong         => "minecraft_raknet_pongs", "RakNet unconnected pings answered by the filter itself";
+
+    VoiceVerified      => "minecraft_voice_verified", "Voice chat sessions opened";
+    VoiceInvalid       => "minecraft_voice_invalid", "Datagrams on the voice chat port that are not voice chat packets";
+    VoicePing          => "minecraft_voice_pings", "Unauthenticated voice chat pings passed";
 }
 
 /// Userspace mirror of `struct statistics` (one per-cpu slot of `stats_map`).
@@ -184,6 +188,7 @@ impl FloodLog {
                 (Stat::IceInvalid, "invalid ice"),
                 (Stat::GuardInvalid, "invalid guard"),
                 (Stat::UdpguardInvalid, "invalid udp guard"),
+                (Stat::VoiceInvalid, "invalid voice"),
                 (Stat::TcpBypass, "tcp flags"),
                 (Stat::TcpRateLimited, "tcp flow rate"),
                 (Stat::UdpRateLimited, "udp flow rate"),
@@ -348,7 +353,7 @@ mod tests {
             .collect();
         assert_eq!(c_names, STAT_NAMES);
         assert_eq!(Stat::IncomingPackets as usize, 0);
-        assert_eq!(Stat::RaknetPong as usize, STAT_COUNT - 1);
+        assert_eq!(Stat::VoicePing as usize, STAT_COUNT - 1);
         assert_eq!(std::mem::size_of::<Statistics>(), STAT_COUNT * 8);
     }
 

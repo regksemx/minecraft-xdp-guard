@@ -164,6 +164,7 @@ enum flow_kind
     FLOW_ICE = 4,     // WebRTC session opened by a STUN binding request
     FLOW_ADOPTED = 5, // existed before the filter was attached
     FLOW_UDP_GUARD = 6, // generic UDP guard session
+    FLOW_VOICE = 7,   // Simple Voice Chat session
 };
 
 /*
@@ -180,7 +181,7 @@ struct flow_entry
     __u32 win_pkts;   // packets within the current window
     __u8 kind;        // enum flow_kind
     __u8 good_marked; // the source ip already got its good mark from this flow
-    __u16 pad;
+    __u16 connection; // voice chat: digest of the connection id the session is bound to
 };
 _Static_assert(sizeof(struct flow_entry) == 24, "flow_entry size mismatch!");
 

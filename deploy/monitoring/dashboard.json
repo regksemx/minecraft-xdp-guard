@@ -419,6 +419,15 @@
             "type": "prometheus",
             "uid": "${datasource}"
           }
+        },
+        {
+          "refId": "T23",
+          "expr": "sum(rate(minecraft_voice_invalid{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "invalid voice",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
         }
       ]
     },
@@ -532,6 +541,24 @@
           "refId": "T7",
           "expr": "sum(rate(minecraft_raknet_pongs{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "bedrock pings answered by the filter",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "T8",
+          "expr": "sum(rate(minecraft_voice_verified{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "voice sessions",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "T9",
+          "expr": "sum(rate(minecraft_voice_pings{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "voice pings",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

@@ -35,9 +35,13 @@ pong_refresh_secs = 1
 ice_start_port = 27020
 ice_end_port = 27029
 
-[udp_guard]
+[voice]
 start_port = 24454
 end_port = 24454
+
+[udp_guard]
+start_port = 24500
+end_port = 24500
 first_byte = 255
 min_size = 17
 
@@ -134,12 +138,21 @@ def main():
     client.expect(f"ice_dtls {ice}", "ok")
     client.expect("ice_stray", "timeout")
 
-    # voice chat stand-in behind the generic UDP guard
-    voice_packet = "ff" + "11" * 30
-    voice = client.expect(f"voice {voice_packet}", "ok")
-    client.expect(f"voice {voice_packet} {voice}", "ok")
-    client.expect(f"voice 0102030405060708090a0b0c0d0e0f101112 {voice}", "timeout")   # wrong first byte
-    client.expect("voice ff0102", "timeout")                                           # too short
+    # Simple Voice Chat: authentication (29 encrypted bytes), then audio
+    voice = client.expect("voice a1 29", "ok")
+    client.expect(f"voice a1 120 {voice}", "ok")
+    client.expect(f"voice a1 1315 {voice}", "ok")
+    client.expect("voice_ping", "ok")
+    client.expect(f"voice_raw {'ff' + '11' * 30} {voice}", "timeout")   # length does not match the datagram
+    client.expect("voice a1 28", "timeout")                             # too short to be encrypted
+    client.expect("voice_raw 0102030405060708090a0b0c0d0e0f101112", "timeout")
+
+    # some other UDP service behind the generic guard
+    guard_packet = "ff" + "11" * 30
+    guarded = client.expect(f"guard {guard_packet}", "ok")
+    client.expect(f"guard {guard_packet} {guarded}", "ok")
+    client.expect(f"guard 0102030405060708090a0b0c0d0e0f101112 {guarded}", "timeout")   # wrong first byte
+    client.expect("guard ff0102", "timeout")                                             # too short
 
     # unprotected ports are none of the filter's business
     client.expect("tcp_raw 8080 00", "reply")
@@ -149,6 +162,9 @@ def main():
     check("metrics: raknet sessions", loader.metric("minecraft_raknet_verified") == 1)
     check("metrics: ice sessions", loader.metric("minecraft_ice_verified") == 1)
     check("metrics: guard connections", loader.metric("minecraft_guard_verified") == 1)
+    check("metrics: voice sessions", loader.metric("minecraft_voice_verified") == 1)
+    check("metrics: voice pings", loader.metric("minecraft_voice_pings") == 1)
+    check("metrics: invalid voice", loader.metric("minecraft_voice_invalid") == 3)
     check("metrics: udp guard sessions", loader.metric("minecraft_udp_guard_verified") == 1)
     check("metrics: udp guard invalid", loader.metric("minecraft_udp_guard_invalid") == 2)
     check("metrics: bad hosts", loader.metric("minecraft_bad_host") == 2)
@@ -375,8 +391,11 @@ def main():
     ice6 = client6.expect("ice_open", "ok")
     client6.expect(f"ice_dtls {ice6}", "ok")
     client6.expect("ice_stray", "timeout")
-    client6.expect(f"voice {voice_packet}", "ok")
-    client6.expect("voice ff0102", "timeout")
+    voice6 = client6.expect("voice b2 29", "ok")
+    client6.expect(f"voice b2 120 {voice6}", "ok")
+    client6.expect("voice b2 28", "timeout")
+    client6.expect(f"guard {guard_packet}", "ok")
+    client6.expect("guard ff0102", "timeout")
     check("IPv6 logins reached the server", "java login mc.e2e.test Steve6" in events())
     check("the IPv6 ping was answered by the server", f"raknet ping {CLIENT_IP6}" in events())
     time.sleep(1.5)

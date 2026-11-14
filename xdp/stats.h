@@ -67,6 +67,10 @@ enum stat_id
     STAT_UDPGUARD_INVALID,  // datagrams with the wrong first byte or size
     STAT_RAKNET_PONG,       // unconnected pings answered by the filter itself
 
+    STAT_VOICE_VERIFIED,    // voice chat sessions opened
+    STAT_VOICE_INVALID,     // datagrams that are not voice chat packets
+    STAT_VOICE_PING,        // unauthenticated voice chat pings passed
+
     STAT_COUNT
 };
 

@@ -13,7 +13,9 @@
  *   RakNet   OpenConnectionRequest1, then OpenConnectionRequest2 from the
  *            same address. Unconnected pings are answered but rate limited.
  *   ICE      A STUN binding request, then only STUN and DTLS.
- *   UDP guard  Nothing but a first byte and a minimum size (voice chat).
+ *   Voice    The frame of a Simple Voice Chat packet; a session is bound
+ *            to the connection id that opened it.
+ *   UDP guard  Nothing but a first byte and a minimum size.
  *
  * IPv6 is, depending on IPV6_MODE, passed untouched, dropped for the
  * protected ports, or inspected exactly like IPv4.
@@ -50,6 +52,7 @@
 #include "config.h"
 #include "protocol.h"
 #include "bedrock.h"
+#include "voice.h"
 #include "stats.h"
 
 // fragment bits of iphdr->frag_off (kernel-internal net/ip.h, not uapi)
@@ -281,6 +284,7 @@ enum port_class
     PORT_RAKNET,
     PORT_ICE,
     PORT_UDP_GUARD,
+    PORT_VOICE,
 };
 
 static __always_inline __u8 port_in_range(const __u32 port, const __u32 start, const __u32 end)
@@ -310,6 +314,10 @@ static __always_inline __u32 udp_port_class(const __u32 port)
     if (port_in_range(port, ICE_START_PORT, ICE_END_PORT))
     {
         return PORT_ICE;
+    }
+    if (port_in_range(port, VOICE_START_PORT, VOICE_END_PORT))
+    {
+        return PORT_VOICE;
     }
     if (port_in_range(port, UDPGUARD_START_PORT, UDPGUARD_END_PORT))
     {
@@ -593,13 +601,14 @@ static __always_inline __u32 flow_touch(const struct packet *p, struct flow_entr
 }
 
 // promotes the flow of this packet to the fast path; returns 0 on failure
-static __always_inline __u8 verify_flow(const struct packet *p, void *map, const __u8 kind)
+static __always_inline __u8 verify_flow_bound(const struct packet *p, void *map, const __u8 kind, const __u16 connection)
 {
     const struct flow_entry fresh = {
         .win_start = p->now,
         .created = p->now,
         .win_pkts = 1,
         .kind = kind,
+        .connection = connection,
     };
     if (bpf_map_update_elem(map, &p->flow, &fresh, BPF_ANY) < 0)
     {
@@ -607,6 +616,11 @@ static __always_inline __u8 verify_flow(const struct packet *p, void *map, const
         return 0;
     }
     return 1;
+}
+
+static __always_inline __u8 verify_flow(const struct packet *p, void *map, const __u8 kind)
+{
+    return verify_flow_bound(p, map, kind, 0);
 }
 
 /* ------------------------------------------------------------------------
@@ -1130,6 +1144,7 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
 {
     const __u8 ice = class == PORT_ICE;
     const __u8 guard = class == PORT_UDP_GUARD;
+    const __u8 voice = class == PORT_VOICE;
     const __u32 udp_len = bpf_ntohs(udp->len);
     const __u8 *payload = (const __u8 *)(udp + 1);
     if (udp_len <= sizeof(struct udphdr))
@@ -1153,11 +1168,44 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
         goto drop;
     }
 
+    // voice chat: every datagram has the same frame, session or not
+    __u16 voice_connection = 0;
+    if (voice)
+    {
+        const __u32 kind = inspect_voice(payload, payload_end, p->data_end, &voice_connection);
+        if (kind == VOICE_INVALID || (kind == VOICE_PING && !VOICE_PINGS))
+        {
+            count_stat(p->stats, STAT_VOICE_INVALID, 1);
+            goto drop;
+        }
+        if (kind == VOICE_PING)
+        {
+            // answered by the server without a session: limited like the
+            // server list pings of Bedrock
+            const __u32 listed = check_lists(p);
+            if (listed == LIST_DENIED)
+            {
+                goto drop;
+            }
+            if (listed == LIST_UNLISTED)
+            {
+                const __u32 admitted = admit(p, OPEN_PING, PING_HITS, PING_BUDGET, 1, first);
+                if (admitted != ADMIT_OK)
+                {
+                    count_udp_refusal(p, admitted, STAT_PING_THROTTLED);
+                    goto drop;
+                }
+            }
+            count_stat(p->stats, STAT_VOICE_PING, 1);
+            return XDP_PASS;
+        }
+    }
+
     // verified sessions only pay for this lookup
     struct flow_entry *session = bpf_map_lookup_elem(&verified_udp, &p->flow);
     if (session)
     {
-        const __u32 touched = flow_touch(p, session, UDP_IDLE_NS, UDP_FLOW_PPS);
+        const __u32 touched = flow_touch(p, session, UDP_IDLE_NS, voice ? VOICE_FLOW_PPS : UDP_FLOW_PPS);
         if (touched == FLOW_LIMITED)
         {
             count_stat(p->stats, STAT_UDP_RATE_LIMITED, 1);
@@ -1176,6 +1224,15 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
         else if (guard)
         {
             return XDP_PASS;
+        }
+        else if (voice)
+        {
+            if (session->connection == voice_connection)
+            {
+                return XDP_PASS;
+            }
+            // another connection id from the same address: not part of this
+            // session, it has to open its own (and pay for it) below
         }
         else if (ice)
         {
@@ -1201,6 +1258,26 @@ static __always_inline __u32 handle_udp(struct packet *p, const struct udphdr *u
     }
     if (listed == LIST_ALLOWED)
     {
+        return XDP_PASS;
+    }
+
+    if (voice)
+    {
+        // The encrypted payload proves nothing to the filter, so the first
+        // well-formed packet opens the session. The client repeats its
+        // authentication every second until the server answers, which is
+        // the retransmit the challenge waits for
+        const __u32 admitted = admit(p, OPEN_UDP, UDP_OPEN_HITS, UDP_OPEN_BUDGET, 1, 0);
+        if (admitted != ADMIT_OK)
+        {
+            count_udp_refusal(p, admitted, STAT_UDP_OPEN_THROTTLED);
+            goto drop;
+        }
+        if (!verify_flow_bound(p, &verified_udp, FLOW_VOICE, voice_connection))
+        {
+            goto drop;
+        }
+        count_stat(p->stats, STAT_VOICE_VERIFIED, 1);
         return XDP_PASS;
     }
 

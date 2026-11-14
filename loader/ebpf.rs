@@ -395,6 +395,11 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
     let ice_start_port = u32::from(config.nethernet.ice_start_port);
     let ice_end_port = u32::from(config.nethernet.ice_end_port);
 
+    let voice_start_port = u32::from(config.voice.start_port);
+    let voice_end_port = u32::from(config.voice.end_port);
+    let voice_flow_pps = config.voice.flow_pps;
+    let voice_pings = config.voice.allow_pings as u8;
+
     let udpguard_start_port = u32::from(config.udp_guard.start_port);
     let udpguard_end_port = u32::from(config.udp_guard.end_port);
     // 256 (UDPGUARD_ANY_BYTE in xdp/bedrock.h) = any first byte
@@ -475,6 +480,10 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
         .override_global("PONG_MAX_AGE_NS", &pong_max_age_ns, true)
         .override_global("ICE_START_PORT", &ice_start_port, true)
         .override_global("ICE_END_PORT", &ice_end_port, true)
+        .override_global("VOICE_START_PORT", &voice_start_port, true)
+        .override_global("VOICE_END_PORT", &voice_end_port, true)
+        .override_global("VOICE_FLOW_PPS", &voice_flow_pps, true)
+        .override_global("VOICE_PINGS", &voice_pings, true)
         .override_global("UDPGUARD_START_PORT", &udpguard_start_port, true)
         .override_global("UDPGUARD_END_PORT", &udpguard_end_port, true)
         .override_global("UDPGUARD_FIRST_BYTE", &udpguard_first_byte, true)
@@ -667,6 +676,13 @@ fn log_protection(config: &Config, cpus: u32, adopt_mode: u8) {
         info!(
             "NetherNet ICE: udp {}",
             ports(nethernet.ice_start_port, nethernet.ice_end_port)
+        );
+    }
+    let voice = &config.voice;
+    if voice.start_port != 0 {
+        info!(
+            "Simple Voice Chat: udp {}",
+            ports(voice.start_port, voice.end_port)
         );
     }
     let udp_guard = &config.udp_guard;

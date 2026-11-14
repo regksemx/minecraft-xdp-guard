@@ -169,13 +169,32 @@ def rak_stray():
     return rak_data(keep(new_udp()))
 
 
-def voice(hex_payload, handle=""):
-    """Sends a datagram to the voice chat stand-in, from a kept socket if given."""
+def udp_echo(port, datagram, handle):
+    """Sends a datagram to an echo server, from a kept socket if given."""
     sock = handles[handle] if handle else new_udp()
-    payload = bytes.fromhex(hex_payload)
-    if udp_exchange(sock, 24454, payload) != payload:
+    if udp_exchange(sock, port, datagram) != datagram:
         return "bad reply"
     return "ok " + (handle or keep(sock))
+
+
+def voice(connection, payload_len, handle=""):
+    """A Simple Voice Chat packet: magic, connection id, payload length and
+    that many bytes standing in for the encrypted payload."""
+    payload = bytes(i * 7 & 0xFF for i in range(int(payload_len)))
+    return udp_echo(24454, b"\xff" + bytes.fromhex(connection) * 16 + varint(len(payload)) + payload, handle)
+
+
+def voice_raw(hex_datagram, handle=""):
+    return udp_echo(24454, bytes.fromhex(hex_datagram), handle)
+
+
+def voice_ping():
+    """The unauthenticated ping of external tools."""
+    return udp_echo(24454, b"\xff" + bytes.fromhex("58bc9ae9c7a845e4a11cefbb67199425") + varint(24) + bytes(24), "")
+
+
+def guard(hex_datagram, handle=""):
+    return udp_echo(24500, bytes.fromhex(hex_datagram), handle)
 
 
 def stray_burst(seconds):

@@ -78,12 +78,29 @@ pong_refresh_secs = 5
 ice_start_port = 0
 ice_end_port = 0
 
+[voice]
+# Simple Voice Chat (UDP), by default port 24454. Its packets are encrypted,
+# so the filter checks what it can see: the frame every packet has (magic
+# byte, connection id, a payload length that matches the datagram and is
+# large enough to be encrypted data). A session is bound to the connection
+# id that opened it; another id from the same address counts as a new
+# session. New sessions are limited by udp_sessions_per_ip, the session
+# budget and the challenge for unknown IPs.
+start_port = 0
+end_port = 0
+# Packets per second of one voice session (0 = unlimited). A client sends 50
+# packets of audio per second while talking.
+flow_pps = 200
+# Let the ping of external tools through (allow_pings in the config of the
+# voice chat). It needs no session and is limited by pings_per_ip.
+allow_pings = true
+
 [udp_guard]
-# Generic guard for other UDP services, e.g. a voice chat. There is no
-# handshake the filter could follow, so it only checks every datagram (a
-# minimum size and, optionally, a fixed first byte) and applies the limits:
-# new sessions per IP, the session budget, the challenge for unknown IPs and
-# udp_flow_pps per session.
+# Generic guard for other UDP services. There is no handshake the filter
+# could follow, so it only checks every datagram (a minimum size and,
+# optionally, a fixed first byte) and applies the limits: new sessions per
+# IP, the session budget, the challenge for unknown IPs and udp_flow_pps per
+# session.
 start_port = 0
 end_port = 0
 # Every datagram has to start with this byte (0-255); -1 = any.
@@ -253,6 +270,7 @@ pub struct Config {
     pub tcp_guard: TcpGuardConfig,
     pub bedrock: BedrockConfig,
     pub nethernet: NetherNetConfig,
+    pub voice: VoiceConfig,
     pub udp_guard: UdpGuardConfig,
     pub limits: LimitsConfig,
     pub attack: AttackConfig,
@@ -362,6 +380,31 @@ pub struct NetherNetConfig {
     pub ice_start_port: u16,
     /// Last ICE port of the inclusive range. Maps to `ICE_END_PORT`.
     pub ice_end_port: u16,
+}
+
+/// `[voice]` — Simple Voice Chat (UDP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VoiceConfig {
+    /// First port of the inclusive range, 0 = off. Maps to `VOICE_START_PORT`.
+    pub start_port: u16,
+    /// Last port of the inclusive range. Maps to `VOICE_END_PORT`.
+    pub end_port: u16,
+    /// Packets per second of one session, 0 = unlimited. Maps to `VOICE_FLOW_PPS`.
+    pub flow_pps: u32,
+    /// Pass the unauthenticated ping. Maps to `VOICE_PINGS`.
+    pub allow_pings: bool,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            start_port: 0,
+            end_port: 0,
+            flow_pps: 200,
+            allow_pings: true,
+        }
+    }
 }
 
 /// `[udp_guard]` — generic guard for UDP services without a handshake.
@@ -865,14 +908,23 @@ impl Config {
             self.udp_guard.start_port,
             self.udp_guard.end_port,
         )?;
-        if [java, guard, raknet, ice, udp_guard].iter().all(Option::is_none) {
+        let voice = check_ports("[voice]", self.voice.start_port, self.voice.end_port)?;
+        if [java, guard, raknet, ice, voice, udp_guard]
+            .iter()
+            .all(Option::is_none)
+        {
             bail!("nothing to protect: every port range is switched off");
         }
         if overlap(java, guard) {
             bail!("the TCP port ranges of [java] and [tcp_guard] must not overlap");
         }
-        if overlap(raknet, ice) || overlap(raknet, udp_guard) || overlap(ice, udp_guard) {
-            bail!("the UDP port ranges of [bedrock], [nethernet] and [udp_guard] must not overlap");
+        let udp = [raknet, ice, voice, udp_guard];
+        for (i, a) in udp.iter().enumerate() {
+            if udp[i + 1..].iter().any(|b| overlap(*a, *b)) {
+                bail!(
+                    "the UDP port ranges of [bedrock], [nethernet], [voice] and [udp_guard] must not overlap"
+                );
+            }
         }
 
         self.java.validate()?;
@@ -1142,6 +1194,9 @@ mod tests {
             "[bedrock]\npong_from = \"127.0.0.1:19132\"",
             "[bedrock]\nstart_port = 19132\nend_port = 19132\npong_from = \"localhost\"",
             "[bedrock]\nstart_port = 19132\nend_port = 19132\npong_refresh_secs = 0",
+            "[voice]\nstart_port = 24454",
+            "[voice]\nstart_port = 24454\nend_port = 24454\n[udp_guard]\nstart_port = 24000\nend_port = 25000",
+            "[voice]\nstart_port = 19132\nend_port = 19132\n[bedrock]\nstart_port = 19132\nend_port = 19132",
             "[udp_guard]\nfirst_byte = 256",
             "[udp_guard]\nfirst_byte = -2",
             "[udp_guard]\nmin_size = 0",

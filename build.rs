@@ -13,6 +13,7 @@ fn main() {
         "xdp/protocol.h",
         "xdp/stats.h",
         "xdp/varint.h",
+        "xdp/voice.h",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }
