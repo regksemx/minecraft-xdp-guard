@@ -1,0 +1,26 @@
+# /etc/systemd/system/minecraft-xdp.service
+#
+#   install -m 755 xdp-loader /usr/local/sbin/xdp-loader
+#   install -d /etc/minecraft-xdp /var/log/minecraft-xdp
+#   install -m 644 deploy/config.edge.toml /etc/minecraft-xdp/config.toml
+#   systemctl enable --now minecraft-xdp
+#
+# Replace eth0 with the interface the players arrive on. Stopping the
+# service detaches the filter (traffic then passes unfiltered); restarting
+# it keeps every verified connection, see [xdp] keep_state.
+[Unit]
+Description=Minecraft XDP filter
+After=network-online.target sys-fs-bpf.mount
+Wants=network-online.target
+
+[Service]
+# the loader writes xdp-loader.log into its working directory
+WorkingDirectory=/var/log/minecraft-xdp
+ExecStart=/usr/local/sbin/xdp-loader --config /etc/minecraft-xdp/config.toml eth0
+Restart=on-failure
+RestartSec=2
+# the maps are preallocated and locked in memory
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

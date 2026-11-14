@@ -1,0 +1,80 @@
+# Example for a game entry node: a Java proxy (Velocity, BungeeCord, HAProxy...) on
+# tcp 25565, Bedrock RakNet on udp 19132, NetherNet signaling on tcp 19132
+# and its ICE ports on udp 27020-27029. Sized for a small machine (6 cores,
+# 1 Gbit/s). Options that are not listed keep their defaults; the default
+# config.toml the loader writes on first start documents every one of them.
+#
+# The budgets are starting values. Run with [metrics] enabled for a few days,
+# look at the peaks of minecraft_verified_connections, minecraft_status_requests,
+# minecraft_raknet_pings and minecraft_syn_packets, and set each budget to a
+# few times the peak the server sees without an attack.
+
+[java]
+start_port = 25565
+end_port = 25565
+online_names = true
+# Every name players may type, the target of each SRV record and, if players
+# may use it, the IP address. A name missing here can not connect at all.
+# hosts = ["mc.example.com", "play.example.com", "example.com"]
+hosts = []
+# 1.16.5 and newer:
+# protocol_min = 754
+
+[tcp_guard]
+# NetherNet signaling: TLS or plain HTTP
+start_port = 19132
+end_port = 19132
+
+[bedrock]
+start_port = 19132
+end_port = 19132
+
+[nethernet]
+ice_start_port = 27020
+ice_end_port = 27029
+
+[limits]
+window_secs = 3
+syn_per_ip = 10
+status_per_ip = 10
+pings_per_ip = 20
+udp_sessions_per_ip = 8
+# far above what a player sends, far below what hurts the proxy
+tcp_flow_pps = 5000
+udp_flow_pps = 1500
+
+[attack]
+challenge = "auto"
+challenge_new_ips_per_sec = 400
+# 32 MiB; keeps first connects fast even at 1 Mpps of spoofed packets
+retry_table_slots = 4194304
+syn_budget = 6000
+login_budget = 300
+status_budget = 1500
+ping_budget = 3000
+udp_session_budget = 300
+good_after_secs = 180
+good_ttl_hours = 72
+
+[lists]
+# monitoring, your other nodes
+allow = []
+deny = []
+
+[xdp]
+mode = "auto"
+# true if the services also listen on IPv6
+drop_ipv6 = true
+keep_state = true
+# "socket" if the proxy listens on this host itself; "blind" if the ports
+# are forwarded into a container or to another machine (DNAT)
+adopt = "socket"
+adopt_secs = 30
+max_player_connections = 131072
+max_udp_sessions = 131072
+max_tracked_ips = 1048576
+
+[metrics]
+enabled = true
+addr = "127.0.0.1:1999"
+poll_secs = 10

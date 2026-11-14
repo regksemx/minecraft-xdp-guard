@@ -1,28 +1,54 @@
 # Minecraft XDP Filter using eBPF – L7 DDoS Protection
 
-This project offers a high-performance XDP-based firewall utilizing eBPF, specifically designed for Minecraft Java Edition servers.  
-It effectively mitigates L7 DDoS attacks by filtering malicious packets at the kernel level (before they reach the network stack).  
-Currently, the filter is available for IPv4 and supports Minecraft versions 1.8 - 26.3    
-The default filtered port is 25565.
+A high-performance XDP firewall for Minecraft servers and proxies. It drops
+malicious packets at the driver level, before the kernel network stack or the
+server spends anything on them.
 
-💬 Questions, feedback or help needed? Join the Discord: https://discord.gg/JnBJPgV4GW
+This is a fork of [Outfluencer/Minecraft-XDP-eBPF](https://github.com/Outfluencer/Minecraft-XDP-eBPF)
+(Java Edition, versions 1.8 - 26.3) that adds Bedrock Edition, NetherNet and
+an attack mode built for small machines.
+
+| Protected | Transport | What a client has to prove |
+|-----------|-----------|----------------------------|
+| Minecraft Java | TCP | TCP handshake, valid Minecraft handshake, then status + ping or a login |
+| Bedrock (RakNet) | UDP | OpenConnectionRequest 1 and 2 from the same address |
+| NetherNet data channels | UDP | STUN binding request first, then only STUN and DTLS |
+| Generic TCP guard (NetherNet signaling) | TCP | TCP handshake, then a TLS ClientHello or an HTTP request |
+
+Everything else aimed at a protected port is dropped. IPv4 only; IPv6 to the
+protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
 
 ## Features
-- **Protocol Analysis**: Analyzes Minecraft handshakes, status, ping, and login requests.
-- **Deep Packet Inspection**: Drops invalid packets, bad VarInts, and protocol violations.
-- **Connection Throttle**: Integrated SYN rate limiting (default: 10 SYNs per 3 seconds per IP).
-- **Zero-Copy Dropping**: Malicious traffic is dropped at the driver level (XDP_DROP) for maximum performance.
+
+- **Protocol inspection**: Java handshake, status, ping and login packets
+  (bad VarInts, wrong lengths, legacy pings, oversized names), RakNet offline
+  messages (magic, protocol version, sizes), STUN, TLS / HTTP openers.
+- **Fast path**: a verified connection costs one hash lookup per packet.
+- **Host filter**: only handshakes for your own host names get through, which
+  stops everything that attacks the bare IP address.
+- **Per IP limits**: new connections, status requests, Bedrock pings and new
+  Bedrock sessions per source IP.
+- **Retransmit challenge**: while a flood of unknown source IPs is running,
+  an unknown IP only gets in with the retransmit of its first packet. Real
+  clients retransmit by themselves; spoofed floods never do and cost one array
+  access per packet.
+- **Budgets and proven players**: caps on logins, status requests, pings and
+  new sessions per second. IPs that played for a few minutes are exempt, so
+  regular players keep getting in while bots fight over the budget.
+- **Packet rate limit** per verified connection.
+- **Allow and deny lists** (IPv4 networks).
+- **Restart without disconnects**: verified connections and known IPs live in
+  pinned maps and survive a restart of the loader; connections that existed
+  before the first start are adopted.
+- **Prometheus metrics** and flood reports in the log.
+
+No timers and no userspace round trips: all state expires lazily inside the
+program, and LRU maps bound the memory.
 
 ## Installation (Linux)
 
-### Download from releases
-
-https://github.com/Outfluencer/Minecraft-XDP-eBPF/releases
-
-You can download the latest build from the Releases Tab  
-Then just run the executable in sudo mode or via root
-
 ### Prerequisites
+- Linux kernel 5.11 or newer (developed and tested on 6.8)
 - Rust toolchain (stable)
 - **System Dependencies**:
   ```bash
@@ -30,8 +56,7 @@ Then just run the executable in sudo mode or via root
   sudo apt install -y gcc-multilib wget gnupg software-properties-common git libbpf-dev
   ```
   If software-properties-common was not found remove it from the command.
-- **LLVM/Clang Toolchain**:
-  The build requires a recent LLVM version (CI uses LLVM 21).
+- **LLVM/Clang Toolchain** (19 or newer):
   ```bash
   wget https://apt.llvm.org/llvm.sh
   chmod +x llvm.sh
@@ -43,80 +68,152 @@ Then just run the executable in sudo mode or via root
     ```bash
     ./build.sh
     ```
-    The compiled binary will be at `target/release/xdp-loader`.
+    The compiled binary will be at `target/release/xdp-loader`. On macOS, or
+    to keep the toolchain off the host, build inside the container instead:
+    `dev/run.sh cargo build --release`.
 
-2.  **Run the tests** (optional):
-    ```bash
-    cargo test
-    ```
-    Besides the Rust unit tests this compiles the eBPF parsing code (VarInt
-    reader, packet inspectors) natively with ASan/UBSan and runs its C unit
-    tests (see `xdp/tests/protocol_test.c`).
-
-3.  **Run the firewall**:
+2.  **Run the firewall**:
     ```bash
     sudo ./target/release/xdp-loader <network_interface>
     # Example:
     sudo ./target/release/xdp-loader eth0
     ```
+    On first run a documented `config.toml` is written to the working
+    directory; by default only Java on port 25565 is protected. A complete
+    example for a Java + Bedrock + NetherNet entry node is in
+    [`deploy/config.edge.toml`](deploy/config.edge.toml), a systemd unit in
+    [`deploy/minecraft-xdp.service`](deploy/minecraft-xdp.service).
 
-    To enable Prometheus metrics export, set `enabled = true` and an `addr`
-    in the `[metrics]` section of `config.toml` (see
-    [Configuration](#configuration)), then run the loader normally. With
-    `addr = "127.0.0.1:1999"` the metrics are available at:
-    `http://127.0.0.1:1999/metrics`
-
-**Note:** This project uses a persistent XDP loader. The userspace program must stay running to keep the filter attached; all map state (throttle windows, verified connections) is managed in-kernel via `bpf_timer`. Stopping the loader will unload the firewall. Requires Linux kernel 5.15 or newer.
+**Note:** The userspace loader must stay running to keep the filter attached.
+Stopping it detaches the filter (traffic then passes unfiltered); the tables
+of verified connections stay pinned in `/sys/fs/bpf/minecraft-xdp`, so the
+next start continues where the last one stopped. `--reset-state` starts from
+scratch.
 
 ## Configuration
 
-Runtime behavior is controlled by a `config.toml` file next to the binary.
-On first run it is created automatically with documented defaults; edit it and
-restart the loader. Use `--config <path>` to point at a different file.
+Runtime behavior is controlled by a `config.toml` file. On first run it is
+created automatically with every option documented; edit it and restart the
+loader. Use `--config <path>` to point at a different file. All values are
+pushed into the eBPF program at load time, so changing them only requires a
+restart — **not a rebuild** — and a disabled feature costs nothing per packet.
 
-**`[filter]`** — what traffic is filtered and how strictly:
+A port range with `start_port = 0` switches that protection off.
 
-| Option         | Type   | Default | Description |
-|----------------|--------|---------|-------------|
-| `start_port`   | int    | 25565   | First port of the inclusive filtered range. |
-| `end_port`     | int    | 25565   | Last port of the inclusive filtered range. |
-| `hit_count`    | int    | 10      | Max SYNs per source IP per throttle window (`0` disables throttling). |
-| `hit_count_reset_secs` | int | 3   | Throttle window length in seconds; each IP's SYN counter resets in-kernel once its window expires. |
-| `player_idle_timeout_secs` | int | 60 | Idle timeout for verified connections; an idle entry is removed in-kernel after one to two intervals, requiring a new handshake. |
-| `online_names` | bool   | true    | Enforce online-mode usernames (≤16 chars). |
+**`[java]`** — Minecraft Java Edition (TCP)
 
-**`[xdp]`** — how the program attaches and the capacity of its in-kernel tables
-(the maps are preallocated, so higher limits cost kernel memory up front):
+| Option | Default | Description |
+|--------|---------|-------------|
+| `start_port`, `end_port` | 25565 | Inclusive port range. |
+| `online_names` | true | Enforce online-mode usernames (≤16 chars). |
+| `hosts` | `[]` | Host names accepted in the handshake (the name players type, SRV targets, the IP if players may use it). Empty = any. |
+| `protocol_min`, `protocol_max` | 0 | Protocol versions allowed to log in (0 = no bound). |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `mode` | string | `"auto"` | XDP attach mode: `"auto"` (native if the NIC supports it, automatic fallback to generic), `"driver"` (force native, fails when unsupported) or `"skb"` (force generic; works everywhere, slower). |
-| `max_pending_connections` | int | 16384 | Concurrent connections mid-handshake; the least-recently-used entry is evicted when full. |
-| `max_player_connections` | int | 65535 | Concurrent verified player connections; size well above the expected player count. |
-| `max_throttled_ips` | int | 65535 | Source IPs tracked by the SYN throttle; new SYNs are dropped while full (fail closed). |
+**`[tcp_guard]`** — other TCP services where the client talks first
 
-**`[metrics]`** — statistics collection and the Prometheus endpoint:
+| Option | Default | Description |
+|--------|---------|-------------|
+| `start_port`, `end_port` | 0 | Inclusive port range, e.g. 19132 for NetherNet signaling. |
+| `allow_tls`, `allow_http` | true | What the first payload may be. |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | bool | false | Collect packet statistics inside the eBPF program. |
-| `addr` | string | (unset) | Address for the Prometheus HTTP endpoint (requires `enabled = true`). |
-| `poll_secs` | int | 10 | How often the in-kernel statistics are read and published. |
+**`[bedrock]`** — Bedrock Edition (RakNet over UDP)
 
-**`[logging]`** — console and file logging:
+| Option | Default | Description |
+|--------|---------|-------------|
+| `start_port`, `end_port` | 0 | Inclusive port range, usually 19132. |
+| `raknet_protocol_min`, `raknet_protocol_max` | 9, 11 | Accepted RakNet protocol versions. |
+| `open_request_min_size` | 400 | Minimum size of OpenConnectionRequest1 (clients pad it to the MTU). |
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `level` | string | `"info"` | Verbosity: `"off"`, `"error"`, `"warn"`, `"info"`, `"debug"` or `"trace"`. Overridden by the `RUST_LOG` env variable. |
-| `file_max_mb` | int | 100 | Rotate `xdp-loader.log` once it grows past this size; the 5 newest rotated files are kept. |
+**`[nethernet]`** — NetherNet WebRTC data channels (UDP)
 
-The `[filter]` values and map capacities are pushed into the eBPF program at
-load time (via `.rodata` globals and map definitions), so changing them only
-requires a restart — **not a rebuild**.  
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ice_start_port`, `ice_end_port` | 0 | Inclusive port range of the ICE candidates. |
+
+**`[limits]`** — per source IP, within windows of `window_secs`
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `window_secs` | 3 | Length of the counting window. |
+| `syn_per_ip` | 10 | New TCP connections. |
+| `status_per_ip` | 10 | Java status requests. |
+| `pings_per_ip` | 20 | Bedrock unconnected pings. |
+| `udp_sessions_per_ip` | 8 | New Bedrock / NetherNet sessions. |
+| `tcp_idle_secs`, `udp_idle_secs` | 60, 30 | A verified connection is forgotten after this long without packets. |
+| `tcp_flow_pps`, `udp_flow_pps` | 0 | Packets per second of one verified connection (0 = unlimited). |
+
+**`[attack]`** — behavior during floods (totals per second, split over the cpus)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `challenge` | `"auto"` | Retransmit challenge for unknown IPs: `"auto"` (only during a flood of unknown IPs), `"always"`, `"off"`. |
+| `challenge_new_ips_per_sec` | 400 | Unknown IPs per second that arm the challenge in `"auto"` mode. |
+| `challenge_hold_secs` | 30 | How long it stays armed after the flood. |
+| `retry_min_ms`, `retry_max_ms` | 200, 10000 | When a retransmit is accepted. |
+| `retry_table_slots` | 1048576 | Size of the challenge table (power of two, 8 bytes per slot). |
+| `syn_budget`, `login_budget`, `status_budget`, `ping_budget`, `udp_session_budget` | 0 | New work per second accepted from IPs that are not proven players (0 = unlimited). |
+| `good_after_secs` | 180 | A game connection of this age makes its IP a proven player (0 = never). |
+| `good_ttl_hours` | 72 | How long that lasts. |
+
+**`[lists]`** — `allow` and `deny`: IPv4 addresses or networks that are never
+inspected, or always dropped, on the protected ports.
+
+**`[xdp]`** — attachment, state and table sizes
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `mode` | `"auto"` | `"auto"` (native if the NIC supports it, else generic), `"driver"`, `"skb"`. |
+| `drop_ipv6` | false | Drop IPv6 packets to the protected ports. |
+| `keep_state` | true | Keep verified connections and known IPs across restarts. |
+| `state_dir` | `/sys/fs/bpf/minecraft-xdp` | Where the state maps are pinned. |
+| `adopt` | `"socket"` | Connections from before the start: `"socket"` (TCP only if this host's kernel has the connection), `"blind"`, `"off"`. |
+| `adopt_secs` | 30 | For how long after the start they are adopted. |
+| `max_pending_connections` | 16384 | TCP connections mid-inspection. |
+| `max_player_connections` | 65536 | Verified TCP connections. |
+| `max_pending_udp_sessions` | 16384 | Bedrock clients between their two requests. |
+| `max_udp_sessions` | 65536 | Verified UDP sessions. |
+| `max_tracked_ips` | 262144 | Source IPs with counters and the proven player mark. |
+
+**`[metrics]`** — `enabled`, `addr` (e.g. `127.0.0.1:1999`, serves `/metrics`),
+`poll_secs`. With metrics enabled the log also reports floods: what is being
+dropped and why.
+
+**`[logging]`** — `level`, `file_max_mb`.
+
+## Things to know
+
+- **Host filter and SRV records**: clients that resolve a SRV record send the
+  SRV *target* in the handshake, not the name the player typed. List both.
+- **The first data packet finishes the TCP handshake.** The filter drops the
+  bare ACK of the TCP handshake on purpose, so the server only ever sees
+  connections whose first packet passed inspection. This needs protocols
+  where the client talks first; do not put SSH, SMTP or MySQL behind the TCP
+  guard.
+- **Bots with real IPs and valid logins pass**, as they must: that is what
+  the per IP limits, the login budget and a limbo / anti-bot plugin are for.
+- **Native XDP needs driver support** (igb, ixgbe, i40e, ice, mlx4/5, bnxt,
+  virtio_net, ...). Generic mode works everywhere and is several times
+  slower, which is still plenty for a 1 Gbit/s port.
+
+## Tests
+
+```bash
+dev/run.sh                    # everything, inside a container (needs Docker)
+cargo test                    # Rust tests + native C tests of the parsers (ASan/UBSan)
+sudo dev/kernel-test.sh       # the real BPF program in the running kernel, packet by packet
+sudo dev/kernel-test.sh bench # cost per packet on the important paths
+sudo dev/e2e-test.sh          # the real loader between a client and stand-in servers
+```
+
+`dev/kernel-test.sh` attaches nothing and is safe to run on a production
+machine: it is the quickest way to check that the kernel there accepts the
+program.
 
 ## Troubleshooting
 
 ### Non-root / Permission Errors
-Please always check if you are running as root if any error occurred. If you are not, try again with `sudo`.  
+Please always check if you are running as root if any error occurred. If you are not, try again with `sudo`.
 
-⭐ **Don't forget to star the project on GitHub!**  
+### Players can not connect after enabling `hosts`
+The name they use is missing from the list; `minecraft_bad_host` in the
+metrics counts those handshakes.

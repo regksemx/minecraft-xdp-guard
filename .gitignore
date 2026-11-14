@@ -3,6 +3,7 @@
 
 # Build output
 build/
+dist/
 target/
 *.o
 *.elf
