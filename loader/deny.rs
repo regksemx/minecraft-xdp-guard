@@ -180,7 +180,7 @@ fn parse_nets(args: &[String]) -> Result<Vec<Ipv4Net>> {
 
 /// The config of the running loader: the given file, else `config.toml` in
 /// the working directory, else the defaults. Never creates a file.
-fn load_config(path: Option<&str>) -> Result<Config> {
+pub fn load_config(path: Option<&str>) -> Result<Config> {
     match path {
         Some(path) if !Path::new(path).exists() => bail!("config file '{path}' not found"),
         Some(path) => Config::load(Path::new(path)),

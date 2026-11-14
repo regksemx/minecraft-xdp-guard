@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use aya::maps::lpm_trie::{Key, LpmTrie};
 use aya::maps::{HashMap, MapInfo};
+use aya::programs::links::{FdLink, PinnedLink};
+use aya::programs::xdp::{XdpLink, XdpLinkId};
 use aya::programs::{Xdp, XdpMode};
 use aya::{Ebpf, EbpfLoader, include_bytes_aligned};
 use log::{info, warn};
@@ -35,8 +37,22 @@ struct StateMap {
 /// The maps that are pinned while the loader runs: verified flows, what is
 /// known about source ips and the deny list. Pinning lets them outlive a
 /// restart and lets `xdp-loader deny` reach them. Sizes mirror xdp/common.h.
-fn state_maps(config: &Config) -> [StateMap; 4] {
+fn state_maps(config: &Config) -> [StateMap; 6] {
     [
+        // connections in the middle of inspection: pinned so that a client
+        // connecting right when the loader is replaced does not fail
+        StateMap {
+            name: "pending_tcp",
+            key_size: 12,
+            value_size: 12,
+            max_entries: config.xdp.max_pending_connections,
+        },
+        StateMap {
+            name: "pending_udp",
+            key_size: 12,
+            value_size: 16,
+            max_entries: config.xdp.max_pending_udp_sessions,
+        },
         // the capacity of the deny list is fixed in xdp/minecraft_filter.c
         StateMap {
             name: deny::MAP_NAME,
@@ -67,6 +83,45 @@ fn state_maps(config: &Config) -> [StateMap; 4] {
 
 pub fn state_dir(config: &Config) -> PathBuf {
     Path::new(&config.xdp.state_dir).join(STATE_LAYOUT)
+}
+
+/// Where the attachment to `interface` is pinned. As long as this file
+/// exists the filter stays attached, with or without a loader process.
+fn link_pin(config: &Config, interface: &str) -> PathBuf {
+    state_dir(config).join(format!("link-{interface}"))
+}
+
+/// The loaded and attached filter.
+pub struct Filter {
+    pub ebpf: Ebpf,
+    /// Pin of the attachment, if it could be pinned.
+    link_pin: Option<PathBuf>,
+}
+
+impl Filter {
+    /// Detaches the filter from the interface. Merely dropping a `Filter`
+    /// leaves it attached (if the attachment is pinned), which is how a
+    /// restarted loader takes over without a gap and why a crashed loader
+    /// does not leave the server unprotected.
+    pub fn detach(self) {
+        if let Some(pin) = &self.link_pin
+            && let Err(e) = std::fs::remove_file(pin)
+        {
+            warn!("Failed to remove '{}': {e}", pin.display());
+        }
+        // dropping the program closes the last reference to the link
+    }
+}
+
+/// `xdp-loader detach`: removes the pinned attachment of a loader that is
+/// gone. Returns whether there was one.
+pub fn detach_interface(config: &Config, interface: &str) -> Result<bool> {
+    let pin = link_pin(config, interface);
+    match std::fs::remove_file(&pin) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("failed to remove '{}'", pin.display())),
+    }
 }
 
 /// Removes the pinned state maps, so the next load starts from scratch.
@@ -167,10 +222,13 @@ fn random_seed() -> u64 {
 /// Loads the embedded eBPF object, applies the runtime configuration and
 /// attaches the XDP program to `interface`.
 ///
-/// The returned handle owns the attachment: dropping it detaches the filter.
+/// If an earlier loader left its filter attached (it was asked to hand
+/// over, or it died), the new program atomically replaces the old one on
+/// that attachment: there is no moment without a filter.
+///
 /// No userspace involvement is needed while it runs: all state expires
 /// lazily inside the program.
-pub fn load_and_attach(interface: &str, config: &Config) -> Result<Ebpf> {
+pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
     let object = include_bytes_aligned!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/xdp/minecraft_filter.o"
@@ -361,17 +419,71 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Ebpf> {
         .try_into()?;
     program.load()?;
 
-    // Auto does its own driver -> skb fallback instead of leaving the choice
-    // to the kernel, so the mode that is actually active can be logged.
-    let (link, mode) = match config.xdp.mode {
+    // without pinned maps there is no state directory to pin the link in
+    let pin = (!pins.is_empty()).then(|| link_pin(config, interface));
+
+    let took_over = match &pin {
+        Some(pin) if pin.exists() => match take_over(program, pin) {
+            Ok(()) => true,
+            Err(e) => {
+                // e.g. the interface was recreated; removing the pin detaches
+                // whatever is left of the old attachment
+                warn!("Could not take over the existing attachment ({e:#}), attaching anew");
+                std::fs::remove_file(pin)
+                    .with_context(|| format!("failed to remove '{}'", pin.display()))?;
+                false
+            }
+        },
+        _ => false,
+    };
+
+    if took_over {
+        info!("BPF program attached to interface {interface}: took over the existing attachment without a gap");
+    } else {
+        let (link_id, mode) = attach(program, interface, config.xdp.mode)?;
+        if let Some(pin) = &pin {
+            // the pin, not this process, keeps the filter attached from now on
+            let link = program.take_link(link_id)?;
+            let link = FdLink::try_from(link)
+                .context("this kernel attaches XDP without a link that could be pinned")?;
+            link.pin(pin)
+                .with_context(|| format!("failed to pin the attachment at '{}'", pin.display()))?;
+        }
+        info!("BPF program attached to interface {interface} in {mode} mode");
+    }
+
+    log_protection(config, cpus, adopt_mode);
+    Ok(Filter {
+        ebpf,
+        link_pin: pin,
+    })
+}
+
+/// Atomically replaces the program of the attachment pinned at `pin`.
+fn take_over(program: &mut Xdp, pin: &Path) -> Result<()> {
+    let link = PinnedLink::from_pin(pin).context("cannot open the pinned attachment")?;
+    let link = XdpLink::try_from(FdLink::from(link)).context("the pin is not an XDP attachment")?;
+    program.attach_to_link(link)?;
+    Ok(())
+}
+
+/// Attaches the program to `interface`. Auto does its own driver -> skb
+/// fallback instead of leaving the choice to the kernel, so the mode that is
+/// actually active can be logged.
+fn attach(
+    program: &mut Xdp,
+    interface: &str,
+    mode: ConfigXdpMode,
+) -> Result<(XdpLinkId, ConfigXdpMode)> {
+    match mode {
         ConfigXdpMode::Auto => match program.attach(interface, XdpMode::Driver) {
-            Ok(link) => (link, ConfigXdpMode::Driver),
+            Ok(link) => Ok((link, ConfigXdpMode::Driver)),
             Err(err) => {
                 info!("'{interface}' does not support native XDP ({err}), using generic skb mode");
                 let link = program
-                    .attach(interface, aya::programs::XdpMode::Skb)
+                    .attach(interface, XdpMode::Skb)
                     .with_context(|| format!("failed to attach to interface '{interface}'"))?;
-                (link, ConfigXdpMode::Skb)
+                Ok((link, ConfigXdpMode::Skb))
             }
         },
         ConfigXdpMode::Driver => {
@@ -383,19 +495,15 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Ebpf> {
                      (the NIC driver may not support XDP; try mode = \"skb\")"
                     )
                 })?;
-            (link, ConfigXdpMode::Driver)
+            Ok((link, ConfigXdpMode::Driver))
         }
         ConfigXdpMode::Skb => {
             let link = program.attach(interface, XdpMode::Skb).with_context(|| {
                 format!("failed to attach to interface '{interface}' in skb mode")
             })?;
-            (link, ConfigXdpMode::Skb)
+            Ok((link, ConfigXdpMode::Skb))
         }
-    };
-    info!("BPF program attached to interface {interface} in {mode} mode ({link:?})");
-
-    log_protection(config, cpus, adopt_mode);
-    Ok(ebpf)
+    }
 }
 
 fn fill_hosts(ebpf: &mut Ebpf, hashes: &[u64]) -> Result<()> {

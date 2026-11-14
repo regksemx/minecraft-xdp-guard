@@ -2,6 +2,7 @@
 namespaces joined by a veth pair, the loader on the server end, stand-in
 servers behind it and a scriptable client in front of it."""
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,38 @@ class Loader:
         self.process.terminate()
         check("loader exits cleanly", self.process.wait(timeout=10) == 0)
 
+    def hand_over(self):
+        """Stops the loader but leaves its filter attached (systemctl reload)."""
+        self.process.send_signal(signal.SIGUSR1)
+        check("loader exits cleanly on hand-over", self.process.wait(timeout=10) == 0)
+
+    def kill(self):
+        """The loader dies without a chance to clean up."""
+        self.process.kill()
+        self.process.wait()
+
+    def run(self, *args):
+        """Runs another loader command (`detach ...`); returns its output."""
+        process = in_ns(SRV, [self.binary, *args], cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        output = process.communicate()[0]
+        check(" ".join(args), process.returncode == 0, output)
+        return output
+
+    @staticmethod
+    def detached():
+        """Whether the filter is gone; the kernel releases a link shortly
+        after its last reference, not synchronously."""
+        for _ in range(20):
+            if not Loader.attached():
+                return True
+            time.sleep(0.05)
+        return False
+
+    @staticmethod
+    def attached():
+        """Whether an XDP program is attached to the server interface."""
+        return "prog/xdp" in sh(f"ip -n {SRV} link show veth-srv").stdout
+
     def metric(self, name):
         code = (
             "import urllib.request,sys;"
@@ -104,6 +137,14 @@ class Client:
     def ask(self, command):
         self.process.stdin.write(command + "\n")
         self.process.stdin.flush()
+        return self.process.stdout.readline().strip()
+
+    def send(self, command):
+        """Starts a command without waiting for its answer, see receive()."""
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+
+    def receive(self):
         return self.process.stdout.readline().strip()
 
     def expect(self, command, expected):

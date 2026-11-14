@@ -162,6 +162,26 @@ def rak_stray():
     return rak_data(keep(new_udp()))
 
 
+def stray_burst(seconds):
+    """Sends game data without a session every 2ms and counts the answers:
+    any answer means a packet got past the filter."""
+    sock = new_udp()
+    sock.setblocking(False)
+    sent = answers = 0
+    end = time.monotonic() + float(seconds)
+    while time.monotonic() < end:
+        sock.sendto(b"\x84\x01\x00\x00\x00\x00\x08\x15", (SERVER, 19132))
+        sent += 1
+        time.sleep(0.002)
+        try:
+            while True:
+                sock.recv(2048)
+                answers += 1
+        except BlockingIOError:
+            pass
+    return f"ok {answers} {sent}"
+
+
 def ice_open(attempts="1"):
     sock = new_udp()
     stun = b"\x00\x01\x00\x08\x21\x12\xa4\x42" + bytes(12) + bytes(8)

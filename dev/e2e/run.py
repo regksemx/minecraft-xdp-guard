@@ -134,7 +134,7 @@ def main():
     loader.stop()
     client.expect(f"echo {java}", "ok")                                # no filter in between
     output = loader.start(**DEFAULTS)
-    check("pinned maps are reused", output.count("Reusing pinned map") == 4, output)
+    check("pinned maps are reused", output.count("Reusing pinned map") == 6, output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"echo {java_split}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
@@ -147,7 +147,7 @@ def main():
     loader.stop()
     output = loader.start(reset=True, **{**DEFAULTS, "adopt": "socket"})
     # connections and known ips are forgotten, the deny list is not
-    check("state was reset", output.count("Removed pinned map") == 3 and output.count("Reusing pinned map") == 1,
+    check("state was reset", output.count("Removed pinned map") == 5 and output.count("Reusing pinned map") == 1,
           output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
@@ -244,9 +244,71 @@ def main():
     loader.start(**DEFAULTS)
     client.expect("rak_ping", "ok")
 
+    # ---- phase 7: replacing the loader without a gap ---------------------
+    java = client.expect("java_login Steve mc.e2e.test", "ok")
+    raknet = client.expect("rak_connect", "ok")
+    prober = Client()
+
+    def probe_during(action):
+        """Garbage every 2ms for 3s while `action` runs; returns (answers, sent)."""
+        prober.send("stray_burst 3")
+        time.sleep(0.5)
+        action()
+        answer = prober.receive().split()
+        return int(answer[1]), int(answer[2])
+
+    # an ordinary restart: stop detaches, so for a moment everything passes
+    # (this also shows that the probe would notice a gap)
+    def restart():
+        loader.stop()
+        check("stop detaches the filter", Loader.detached())
+        loader.start(**DEFAULTS)
+
+    answers, sent = probe_during(restart)
+    check("an ordinary restart leaves a gap", answers > 0 and sent > 1000, f"({answers} of {sent} answered)")
+
+    # hand-over: the old program keeps filtering until the new one replaces it
+    def hand_over():
+        loader.hand_over()
+        check("the filter stays attached without a loader", Loader.attached())
+        check("the old loader announces the hand-over", "Leaving the filter attached" in loader.output())
+        client.expect("rak_stray", "timeout")                          # still filtering
+        client.expect(f"rak_data {raknet}", "ok")
+        output = loader.start(**{**DEFAULTS, "syn_per_ip": 50})        # with a changed config
+        check("the new loader takes over", "took over the existing attachment" in output, output)
+
+    answers, sent = probe_during(hand_over)
+    check("a hand-over leaves no gap", answers == 0 and sent > 1000, f"({answers} of {sent} answered)")
+    client.expect(f"echo {java}", "ok")
+    client.expect(f"rak_data {raknet}", "ok")
+    client.expect("java_status mc.e2e.test", "ok")
+
+    # a loader that dies does not take the protection with it
+    def crash():
+        loader.kill()
+        check("the filter survives a crash of the loader", Loader.attached())
+        output = loader.start(**DEFAULTS)
+        check("the restarted loader takes over", "took over the existing attachment" in output, output)
+
+    answers, sent = probe_during(crash)
+    check("a crash leaves no gap", answers == 0 and sent > 1000, f"({answers} of {sent} answered)")
+    client.expect(f"echo {java}", "ok")
+
+    # the filter of a dead loader can be removed by hand
+    loader.kill()
+    check("detach reports nothing for another interface",
+          "no filter" in loader.run("detach", "-c", os.path.join(workdir, "config.toml"), "lo"))
+    check("detach removes the filter",
+          "detached the filter" in loader.run("detach", "-c", os.path.join(workdir, "config.toml"), "veth-srv"))
+    check("the filter is gone", Loader.detached())
+    client.expect("rak_stray", "ok")
+
+    loader.start(**DEFAULTS)
     loader.stop()
+    check("stop detaches the filter", Loader.detached())
     check("state is kept after exit", sorted(os.listdir(os.path.join(STATE_DIR, "v1"))) ==
-          ["deny_v4", "ip_table", "verified_tcp", "verified_udp"])
+          ["deny_v4", "ip_table", "pending_tcp", "pending_udp", "verified_tcp", "verified_udp"])
+    prober.close()
 
     client.close()
     server.kill()

@@ -19,6 +19,12 @@ const USAGE: &str = "\
 Usage: xdp-loader [OPTIONS] <INTERFACE>
        xdp-loader deny <COMMAND>    Change the deny list of the running
                                     filter, see `xdp-loader deny --help`
+       xdp-loader detach [-c <FILE>] <INTERFACE>
+                                    Remove a filter whose loader is gone
+
+SIGTERM and SIGINT stop the loader and detach the filter. SIGUSR1 and SIGHUP
+stop the loader but leave the filter attached: the next start replaces it
+without a gap (restart with a new configuration or binary).
 
 Arguments:
   <INTERFACE>  Network interface to attach to
@@ -101,6 +107,13 @@ fn main() {
         }
         return;
     }
+    if argv.first().is_some_and(|arg| arg == "detach") {
+        if let Err(e) = detach(&argv[1..]) {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let args = parse_args();
 
@@ -145,7 +158,6 @@ fn main() {
 }
 
 /// Attaches the XDP filter and keeps it alive until shutdown is triggered.
-/// Dropping the `Ebpf` handle on return detaches the filter again.
 fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
     let interface = args
         .interface
@@ -156,21 +168,55 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
         ebpf::remove_state(config, false);
     }
 
-    // keep the handle alive until the end of this function: dropping it
-    // detaches the XDP program
-    let mut ebpf = ebpf::load_and_attach(interface, config)?;
-    let stats_thread = metrics::start(&mut ebpf, config, shutdown)?;
+    let mut filter = ebpf::load_and_attach(interface, config)?;
+    let result = serve(&mut filter, config, shutdown);
+
+    if result.is_ok() && shutdown.hand_over() {
+        // the pinned attachment and maps keep filtering on their own
+        info!("Leaving the filter attached, the next start takes it over");
+    } else {
+        filter.detach();
+        if !config.xdp.keep_state {
+            ebpf::remove_state(config, true);
+        }
+    }
+    result
+}
+
+/// Publishes metrics until shutdown is triggered.
+fn serve(filter: &mut ebpf::Filter, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
+    let stats_thread = metrics::start(&mut filter.ebpf, config, shutdown)?;
 
     shutdown.wait();
-
-    if !config.xdp.keep_state {
-        ebpf::remove_state(config, true);
-    }
 
     if let Some(handle) = stats_thread {
         handle
             .join()
             .map_err(|e| anyhow::anyhow!("track-stats thread panicked: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// `xdp-loader detach [-c <FILE>] <INTERFACE>`
+fn detach(args: &[String]) -> Result<()> {
+    let mut config_path = None;
+    let mut interface = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-c" | "--config" => {
+                config_path = Some(args.next().context("missing value for --config")?.as_str());
+            }
+            _ if interface.is_none() => interface = Some(arg.as_str()),
+            _ => anyhow::bail!("unexpected argument '{arg}'"),
+        }
+    }
+    let interface = interface.context("missing <INTERFACE>")?;
+    let config = deny::load_config(config_path)?;
+    if ebpf::detach_interface(&config, interface)? {
+        println!("detached the filter from {interface}");
+    } else {
+        println!("no filter of a stopped loader is attached to {interface}");
     }
     Ok(())
 }

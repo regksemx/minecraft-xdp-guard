@@ -38,9 +38,10 @@ protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
 - **Packet rate limit** per verified connection.
 - **Allow and deny lists** (IPv4 networks). Bans can be added while the
   filter runs, with a lifetime, and cut the banned address off immediately.
-- **Restart without disconnects**: verified connections and known IPs live in
-  pinned maps and survive a restart of the loader; connections that existed
-  before the first start are adopted.
+- **Restart without disconnects and without a gap**: verified connections
+  and known IPs live in pinned maps and survive a restart of the loader, and
+  a reload swaps the program atomically. A crashed loader leaves the filter
+  running. Connections that existed before the first start are adopted.
 - **Prometheus metrics** and flood reports in the log.
 
 No timers and no userspace round trips: all state expires lazily inside the
@@ -85,11 +86,19 @@ program, and LRU maps bound the memory.
     [`deploy/config.edge.toml`](deploy/config.edge.toml), a systemd unit in
     [`deploy/minecraft-xdp.service`](deploy/minecraft-xdp.service).
 
-**Note:** The userspace loader must stay running to keep the filter attached.
-Stopping it detaches the filter (traffic then passes unfiltered); the tables
-of verified connections stay pinned in `/sys/fs/bpf/minecraft-xdp`, so the
-next start continues where the last one stopped. `--reset-state` starts from
-scratch.
+**Stopping and restarting**
+
+| | Filter | Players |
+|---|---|---|
+| `SIGTERM`, `SIGINT` (`systemctl stop`) | detached, traffic passes unfiltered | stay connected |
+| `SIGUSR1`, `SIGHUP` (`systemctl reload`) | stays attached; the next start replaces the program atomically, without a gap | stay connected |
+| loader crashes or is killed | stays attached; the restarted loader takes over | stay connected |
+
+Use `reload` to apply a new configuration or binary. The attachment and the
+tables of verified connections, known IPs and bans are pinned in
+`/sys/fs/bpf/minecraft-xdp`; `--reset-state` forgets connections and known
+IPs, and `xdp-loader detach <interface>` removes the filter of a loader that
+is gone.
 
 ## Configuration
 

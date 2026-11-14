@@ -162,6 +162,9 @@ drop_ipv6 = false
 # their memory) after it exits, so that restarting the loader does not
 # disconnect anyone; run the loader with --reset-state to forget connections
 # and known IPs. Without keep_state everything is removed on exit.
+# The attachment to the interface is pinned there as well: SIGUSR1 stops the
+# loader but leaves the filter running, and the next start replaces it
+# without a gap.
 keep_state = true
 state_dir = "/sys/fs/bpf/minecraft-xdp"
 
