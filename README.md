@@ -150,7 +150,7 @@ A port range with `start_port = 0` switches that protection off.
 | `challenge_new_ips_per_sec` | 400 | Unknown IPs per second that arm the challenge in `"auto"` mode. |
 | `challenge_hold_secs` | 30 | How long it stays armed after the flood. |
 | `retry_min_ms`, `retry_max_ms` | 200, 10000 | When a retransmit is accepted. |
-| `retry_table_slots` | 1048576 | Size of the challenge table (power of two, 8 bytes per slot). |
+| `retry_table_slots` | 1048576 | Size of the challenge table (power of two, 8 bytes per slot). Size it for the flood rate the port can carry: 16777216 for 1 Gbit/s. |
 | `syn_budget`, `login_budget`, `status_budget`, `ping_budget`, `udp_session_budget` | 0 | New work per second accepted from IPs that are not proven players (0 = unlimited). |
 | `good_after_secs` | 180 | A game connection of this age makes its IP a proven player (0 = never). |
 | `good_ttl_hours` | 72 | How long that lasts. |
@@ -203,6 +203,7 @@ cargo test                    # Rust tests + native C tests of the parsers (ASan
 sudo dev/kernel-test.sh       # the real BPF program in the running kernel, packet by packet
 sudo dev/kernel-test.sh bench # cost per packet on the important paths
 sudo dev/e2e-test.sh          # the real loader between a client and stand-in servers
+sudo dev/load-test.sh         # spoofed floods from all cpus while real clients keep playing
 ```
 
 `dev/kernel-test.sh` attaches nothing and is safe to run on a production

@@ -46,8 +46,9 @@ udp_flow_pps = 1500
 [attack]
 challenge = "auto"
 challenge_new_ips_per_sec = 400
-# 32 MiB; keeps first connects fast even at 1 Mpps of spoofed packets
-retry_table_slots = 4194304
+# 128 MiB: even with the port saturated by spoofed packets (1.5 Mpps) a
+# newcomer gets in on his first retransmit
+retry_table_slots = 16777216
 syn_budget = 6000
 login_budget = 300
 status_budget = 1500

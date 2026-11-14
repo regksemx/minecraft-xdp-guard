@@ -110,10 +110,12 @@ challenge_hold_secs = 30
 # A retransmit is accepted this long after the first attempt.
 retry_min_ms = 200
 retry_max_ms = 10000
-# Slots of the challenge table (power of two, 8 bytes each). More slots keep
-# first connects fast during bigger floods: at 1 million spoofed packets per
-# second a table of 4194304 slots still lets about 9 of 10 newcomers in on
-# their first retransmit.
+# Slots of the challenge table (power of two, 8 bytes each). A flood keeps
+# overwriting the table, and a newcomer only gets in if his entry survives
+# until he retransmits. At 1.5 million spoofed packets per second (a
+# saturated 1 Gbit/s port) about half of the newcomers get in on their first
+# retransmit with 1048576 slots, 19 of 20 with 4194304 and practically all
+# with 16777216 (128 MiB); the others need one more retransmit.
 retry_table_slots = 1048576
 
 # Budgets: how much new work per second the server accepts from IPs that are
