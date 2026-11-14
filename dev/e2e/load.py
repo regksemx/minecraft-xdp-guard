@@ -165,7 +165,8 @@ def main():
     # nothing of the floods reached the servers
     seen = sorted(set(events()))
     check("only real clients reached the servers",
-          seen == ["java login mc.e2e.test Alex", "java login mc.e2e.test Steve", "java status mc.e2e.test"], str(seen))
+          seen == ["java login mc.e2e.test Alex", "java login mc.e2e.test Steve", "java status mc.e2e.test",
+                   "raknet ping 10.99.0.2"], str(seen))
     # and the first connections are still alive
     player.expect(f"echo {java}", "ok")
     player.expect(f"rak_data {raknet}", "ok")
