@@ -7,6 +7,7 @@ import sys
 import time
 
 SERVER = "10.99.0.1"
+SOURCE = sys.argv[1] if len(sys.argv) > 1 else ""  # local address to connect from
 MAGIC = bytes.fromhex("00ffff00fefefefefdfdfdfd12345678")
 TIMEOUT = 1.0
 handles = {}
@@ -41,18 +42,31 @@ def tcp_connect(port, timeout=TIMEOUT):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.bind((SOURCE, 0))
     sock.connect((SERVER, port))
     return sock
 
 
-def udp_exchange(sock, port, payload):
-    sock.sendto(payload, (SERVER, port))
-    return sock.recv(2048)
+def udp_exchange(sock, port, payload, attempts=1):
+    """Sends a datagram and returns the answer. With several attempts it is
+    resent every 0.5s, like RakNet and ICE do with their connection requests."""
+    sock.settimeout(TIMEOUT if attempts == 1 else 0.5)
+    try:
+        for attempt in range(attempts):
+            sock.sendto(payload, (SERVER, port))
+            try:
+                return sock.recv(2048)
+            except socket.timeout:
+                if attempt == attempts - 1:
+                    raise
+    finally:
+        sock.settimeout(TIMEOUT)
 
 
 def new_udp():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(TIMEOUT)
+    sock.bind((SOURCE, 0))
     return sock
 
 
@@ -67,8 +81,8 @@ def java_status(host):
     return "ok" if b"hello" in reply and len(pong) == 10 else "bad reply"
 
 
-def java_login(name, host, split="0"):
-    sock = tcp_connect(25565)
+def java_login(name, host, split="0", timeout=TIMEOUT):
+    sock = tcp_connect(25565, timeout=float(timeout))
     login = packet(b"\x00" + varint(len(name)) + name.encode() + bytes(16))
     if split == "1":
         sock.sendall(handshake(host, 2))
@@ -123,15 +137,15 @@ def syn_burst(port, count):
     return f"ok {connected}"
 
 
-def rak_ping():
-    reply = udp_exchange(new_udp(), 19132, b"\x01" + bytes(8) + MAGIC + bytes(8))
+def rak_ping(attempts="1"):
+    reply = udp_exchange(new_udp(), 19132, b"\x01" + bytes(8) + MAGIC + bytes(8), int(attempts))
     return "ok" if reply[0] == 0x1C else "bad reply"
 
 
-def rak_connect():
+def rak_connect(attempts="1"):
     sock = new_udp()
     ocr1 = b"\x05" + MAGIC + b"\x0b"
-    if udp_exchange(sock, 19132, ocr1 + bytes(1464 - len(ocr1)))[0] != 0x06:
+    if udp_exchange(sock, 19132, ocr1 + bytes(1464 - len(ocr1)), int(attempts))[0] != 0x06:
         return "bad reply"
     ocr2 = b"\x07" + MAGIC + b"\x04\x0a\x63\x00\x01\x4a\xbc" + (1492).to_bytes(2, "big") + bytes(8)
     if udp_exchange(sock, 19132, ocr2)[0] != 0x08:
@@ -148,10 +162,10 @@ def rak_stray():
     return rak_data(keep(new_udp()))
 
 
-def ice_open():
+def ice_open(attempts="1"):
     sock = new_udp()
     stun = b"\x00\x01\x00\x08\x21\x12\xa4\x42" + bytes(12) + bytes(8)
-    if udp_exchange(sock, 27020, stun) != stun:
+    if udp_exchange(sock, 27020, stun, int(attempts)) != stun:
         return "bad reply"
     return "ok " + keep(sock)
 

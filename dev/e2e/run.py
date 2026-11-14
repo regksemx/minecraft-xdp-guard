@@ -10,38 +10,10 @@ check what happens to established connections.
 Run as root on Linux (dev/run.sh dev/e2e-test.sh does it in a container).
 """
 import os
-import subprocess
 import sys
-import tempfile
 import time
-import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-LOADER = os.path.abspath(sys.argv[1])
-SRV, CLI = "mcxdp-srv", "mcxdp-cli"
-STATE_DIR = "/sys/fs/bpf/mcxdp-e2e"
-
-failures = 0
-checks = 0
-
-
-def sh(command, check=True):
-    return subprocess.run(command, shell=True, check=check, capture_output=True, text=True)
-
-
-def in_ns(ns, argv, **kwargs):
-    # nsenter instead of `ip netns exec`: the latter gives the process its
-    # own /sys without the bpf filesystem the loader pins its maps in
-    return subprocess.Popen(["nsenter", f"--net=/run/netns/{ns}"] + argv, text=True, **kwargs)
-
-
-def check(what, condition, detail=""):
-    global checks, failures
-    checks += 1
-    if not condition:
-        failures += 1
-        print(f"FAIL: {what} {detail}", flush=True)
-
+from harness import STATE_DIR, Client, Loader, check, setup, summary, teardown
 
 CONFIG = """
 [java]
@@ -92,92 +64,13 @@ level = "info"
 """
 
 
-class Loader:
-    def __init__(self, workdir):
-        self.workdir = workdir
-        self.process = None
-
-    def start(self, reset=False, challenge="auto", adopt="off", syn_per_ip=100, allow=(), deny=()):
-        config = os.path.join(self.workdir, "config.toml")
-        with open(config, "w") as f:
-            f.write(CONFIG.format(challenge=challenge, adopt=adopt, syn_per_ip=syn_per_ip, state_dir=STATE_DIR,
-                                  allow=list(allow), deny=list(deny)))
-        argv = [LOADER, "-c", config, "veth-srv"] + (["--reset-state"] if reset else [])
-        self.process = in_ns(SRV, argv, cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        lines = []
-        for line in self.process.stdout:
-            lines.append(line)
-            if "BPF program attached" in line:
-                # keep draining so the loader never blocks on a full pipe
-                subprocess.Popen(["cat"], stdin=self.process.stdout, stdout=subprocess.DEVNULL)
-                return "".join(lines)
-        raise SystemExit("the loader did not attach:\n" + "".join(lines))
-
-    def stop(self):
-        self.process.terminate()
-        check("loader exits cleanly", self.process.wait(timeout=10) == 0)
-
-    def metric(self, name):
-        code = (
-            "import urllib.request,sys;"
-            "sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:1999/metrics', timeout=3).read().decode())"
-        )
-        text = in_ns(SRV, [sys.executable, "-c", code], stdout=subprocess.PIPE).communicate()[0]
-        for line in text.splitlines():
-            if line.startswith(name + " "):
-                return int(float(line.split()[1]))
-        return -1
-
-
-class Client:
-    def __init__(self):
-        self.process = in_ns(CLI, [sys.executable, os.path.join(HERE, "client.py")],
-                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-
-    def ask(self, command):
-        self.process.stdin.write(command + "\n")
-        self.process.stdin.flush()
-        return self.process.stdout.readline().strip()
-
-    def expect(self, command, expected):
-        answer = self.ask(command)
-        check(command, answer.split()[0] == expected if answer else False, f"-> '{answer}', expected '{expected}'")
-        return answer.split()[1] if answer.startswith("ok ") else None
-
-
-def setup():
-    sh("mount -t bpf bpf /sys/fs/bpf", check=False)
-    for ns in (SRV, CLI):
-        sh(f"ip netns del {ns}", check=False)
-        sh(f"ip netns add {ns}")
-    sh(f"ip link add veth-srv netns {SRV} type veth peer name veth-cli netns {CLI}")
-    sh(f"ip -n {SRV} addr add 10.99.0.1/24 dev veth-srv")
-    sh(f"ip -n {CLI} addr add 10.99.0.2/24 dev veth-cli")
-    for ns, dev in ((SRV, "veth-srv"), (CLI, "veth-cli")):
-        sh(f"ip -n {ns} link set lo up")
-        sh(f"ip -n {ns} link set {dev} up")
-    sh(f"rm -rf {STATE_DIR}", check=False)
-
-
-def teardown():
-    for ns in (SRV, CLI):
-        sh(f"ip netns del {ns}", check=False)
-    sh(f"rm -rf {STATE_DIR}", check=False)
+DEFAULTS = {"challenge": "auto", "adopt": "off", "syn_per_ip": 100, "allow": [], "deny": []}
 
 
 def main():
-    setup()
-    workdir = tempfile.mkdtemp(prefix="mcxdp-e2e-")
-    events_path = os.path.join(workdir, "events.log")
-    open(events_path, "w").close()
-    server = in_ns(SRV, [sys.executable, os.path.join(HERE, "server.py"), events_path], stdout=subprocess.PIPE)
-    assert server.stdout.readline().strip() == "ready"
+    workdir, events, server = setup()
     client = Client()
-    loader = Loader(workdir)
-
-    def events():
-        with open(events_path) as f:
-            return f.read().splitlines()
+    loader = Loader(os.path.abspath(sys.argv[1]), workdir, CONFIG)
 
     # ---- without the filter everything reaches the servers -----------------
     client.expect("tcp_raw 8080 00", "reply")
@@ -185,7 +78,7 @@ def main():
     check("servers reachable before the filter is attached", len(events()) == 1)
 
     # ---- phase 1: fresh filter -------------------------------------------
-    print(loader.start(), end="", flush=True)
+    loader.start(**DEFAULTS)
 
     # Java
     client.expect("java_status mc.e2e.test", "ok")
@@ -240,7 +133,7 @@ def main():
     # ---- phase 2: restart, state is kept (adoption is off) ---------------
     loader.stop()
     client.expect(f"echo {java}", "ok")                                # no filter in between
-    output = loader.start()
+    output = loader.start(**DEFAULTS)
     check("pinned maps are reused", output.count("Reusing pinned map") == 3, output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"echo {java_split}", "ok")
@@ -252,7 +145,7 @@ def main():
 
     # ---- phase 3: state lost, existing connections are adopted -----------
     loader.stop()
-    output = loader.start(reset=True, adopt="socket")
+    output = loader.start(reset=True, **{**DEFAULTS, "adopt": "socket"})
     check("state was reset", output.count("Removed pinned map") == 3 and "Reusing" not in output, output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
@@ -265,7 +158,7 @@ def main():
 
     # ---- phase 4: state lost, no adoption, challenge always on -----------
     loader.stop()
-    loader.start(reset=True, adopt="off", challenge="always", syn_per_ip=6)
+    loader.start(reset=True, **{**DEFAULTS, "challenge": "always", "syn_per_ip": 6})
     client.expect(f"echo {java}", "timeout")
     client.expect(f"rak_data {raknet}", "timeout")
     client.expect(f"ice_dtls {ice}", "timeout")
@@ -290,7 +183,7 @@ def main():
 
     # ---- phase 5: deny and allow lists ------------------------------------
     loader.stop()
-    loader.start(reset=True, deny=["10.99.0.0/24", "203.0.113.7"])
+    loader.start(reset=True, **{**DEFAULTS, "deny": ["10.99.0.0/24", "203.0.113.7"]})
     client.expect("java_status mc.e2e.test", "timeout")
     client.expect("rak_ping", "timeout")
     client.expect("tcp_raw 8080 00", "reply")                          # only the protected ports
@@ -298,7 +191,7 @@ def main():
     check("metrics: deny list", loader.metric("minecraft_denylist_dropped") >= 2)
 
     loader.stop()
-    loader.start(reset=True, deny=["10.99.1.0/24"], allow=["10.99.0.2"])
+    loader.start(reset=True, **{**DEFAULTS, "deny": ["10.99.1.0/24"], "allow": ["10.99.0.2"]})
     client.expect("java_status mc.e2e.test", "ok")
     # allowed ips are not inspected: what was dropped in phase 1 gets through
     client.expect("tcp_raw 19132 5353482d322e302d4f70656e5353480d0a", "reply")
@@ -311,11 +204,9 @@ def main():
     check("state is kept after exit", sorted(os.listdir(os.path.join(STATE_DIR, "v1"))) ==
           ["ip_table", "verified_tcp", "verified_udp"])
 
-    client.process.stdin.close()
+    client.close()
     server.kill()
-    teardown()
-    print(f"{checks} checks, {failures} failed", flush=True)
-    return 1 if failures else 0
+    return summary()
 
 
 if __name__ == "__main__":
