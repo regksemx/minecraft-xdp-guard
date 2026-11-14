@@ -5,89 +5,85 @@
 
 #include "config.h"
 
-// selects which statistics count_stats() increments; a bitmask so related
-// counters can be bumped in one call (e.g. DROP_CONNECTION | DROPPED_PACKET)
-enum stats_mask {
-    VERIFIED        = 1u << 0,
-    DROPPED_PACKET  = 1u << 1,
-    STATE_SWITCH    = 1u << 2,
-    DROP_CONNECTION = 1u << 3,
-    SYN_RECEIVE     = 1u << 4,
-    TCP_BYPASS      = 1u << 5,
-    INCOMING_BYTES  = 1u << 6,
-    DROPPED_BYTES   = 1u << 7,
+/*
+ * Statistics counters, one per-cpu slot of stats_map.
+ *
+ * The order MUST match the `statistics!` list in loader/metrics.rs, which
+ * mirrors this enum entry by entry (the loader refuses to start when the map
+ * value size differs). Append new counters at the end, before STAT_COUNT.
+ */
+enum stat_id
+{
+    STAT_INCOMING_PACKETS = 0, // packets aimed at a protected port
+    STAT_INCOMING_BYTES,
+    STAT_DROPPED_PACKETS,
+    STAT_DROPPED_BYTES,
+
+    STAT_DENYLIST,          // dropped by the deny list
+    STAT_ALLOWLIST,         // passed by the allow list without inspection
+    STAT_IPV6_DROPPED,      // IPv6 aimed at a protected port
+    STAT_FRAGMENT_DROPPED,  // first fragment aimed at a protected port
+    STAT_MALFORMED,         // broken L4 headers / lengths
+
+    STAT_NEW_IP,            // source ips that became known
+    STAT_CHALLENGE_DROPPED, // openers of unknown ips dropped by the retransmit challenge
+    STAT_CHALLENGE_PASSED,  // retransmits that passed it
+    STAT_GOOD_IP,           // source ips marked as proven players
+    STAT_TABLE_FULL,        // a map insert failed
+
+    STAT_TCP_SYN,
+    STAT_TCP_BYPASS,        // impossible flag combinations, SYN with payload
+    STAT_SYN_THROTTLED,     // per ip SYN limit
+    STAT_TCP_BUDGET_DROPPED, // per cpu SYN / status / login budget exhausted
+    STAT_TCP_UNTRACKED,     // non-SYN packet of a flow we never saw (ACK floods)
+    STAT_TCP_ADOPTED,       // connection from before the filter was attached
+    STAT_TCP_RATE_LIMITED,  // verified connection above its packet rate
+    STAT_STATE_SWITCH,
+    STAT_DROP_CONNECTION,
+
+    STAT_JAVA_VERIFIED,     // logins that passed inspection
+    STAT_JAVA_STATUS,       // status handshakes passed
+    STAT_STATUS_THROTTLED,  // per ip status limit
+    STAT_JAVA_BAD_HOST,     // handshake host not in allowed_hosts
+    STAT_JAVA_BAD_PROTO,    // login with a protocol version outside the allowed range
+    STAT_JAVA_INVALID,      // handshake / login / status packet failed inspection
+    STAT_GUARD_VERIFIED,    // generic TCP guard connections verified
+    STAT_GUARD_INVALID,
+
+    STAT_RAKNET_PING,       // unconnected pings passed
+    STAT_PING_THROTTLED,    // per ip ping limit
+    STAT_RAKNET_OPEN,       // OpenConnectionRequest1 accepted
+    STAT_RAKNET_VERIFIED,   // OpenConnectionRequest2 accepted, session verified
+    STAT_RAKNET_INVALID,
+    STAT_ICE_VERIFIED,
+    STAT_ICE_INVALID,
+    STAT_UDP_OPEN_THROTTLED, // per ip new session limit
+    STAT_UDP_BUDGET_DROPPED, // per cpu ping / session budget exhausted
+    STAT_UDP_UNTRACKED,     // datagram of a session we never saw
+    STAT_UDP_ADOPTED,       // session from before the filter was attached
+    STAT_UDP_RATE_LIMITED,  // verified session above its packet rate
+
+    STAT_COUNT
 };
 
-// one per-cpu slot of stats_map; must match `Statistics` in loader/metrics.rs
 struct statistics
 {
-    __u64 verified;
-    __u64 dropped_packets;
-    __u64 state_switches;
-    __u64 drop_connection;
-    __u64 syn;
-    __u64 tcp_bypass;
-    __u64 incoming_bytes;
-    __u64 dropped_bytes;
+    __u64 counters[STAT_COUNT];
 };
-_Static_assert(sizeof(struct statistics) == 64, "statistics size mismatch!");
+_Static_assert(sizeof(struct statistics) == STAT_COUNT * 8, "statistics size mismatch!");
 
 /*
- * Adds `amount` to every counter selected by `bitmask`.
- *
  * stats_ptr is NULL whenever PROMETHEUS is 0 (the filter only looks it up
- * when enabled), so the PROMETHEUS check below also guards the dereference.
- * Since PROMETHEUS lives in .rodata, the verifier knows its value at load
- * time and removes either the early return or the entire body as dead code;
- * with constant bitmasks the compiler reduces each call to the few
- * increments that are actually selected.
+ * when enabled). Since PROMETHEUS lives in .rodata, the verifier knows its
+ * value at load time and removes the whole body as dead code when disabled.
  */
-static __always_inline void count_stats(struct statistics *stats_ptr, const __u32 bitmask, const __u64 amount)
+static __always_inline void count_stat(struct statistics *stats_ptr, const enum stat_id id, const __u64 amount)
 {
-    if (!PROMETHEUS)
+    if (!PROMETHEUS || !stats_ptr)
     {
         return;
     }
-
-    if (bitmask & INCOMING_BYTES)
-    {
-        stats_ptr->incoming_bytes += amount;
-    }
-
-    if (bitmask & DROPPED_BYTES)
-    {
-        stats_ptr->dropped_bytes += amount;
-    }
-
-    if (bitmask & VERIFIED)
-    {
-        stats_ptr->verified += amount;
-    }
-
-    if (bitmask & DROPPED_PACKET)
-    {
-        stats_ptr->dropped_packets += amount;
-    }
-
-    if (bitmask & STATE_SWITCH)
-    {
-        stats_ptr->state_switches += amount;
-    }
-
-    if (bitmask & DROP_CONNECTION)
-    {
-        stats_ptr->drop_connection += amount;
-    }
-
-    if (bitmask & SYN_RECEIVE)
-    {
-        stats_ptr->syn += amount;
-    }
-
-    if (bitmask & TCP_BYPASS)
-    {
-        stats_ptr->tcp_bypass += amount;
-    }
+    stats_ptr->counters[id] += amount;
 }
 
 #endif

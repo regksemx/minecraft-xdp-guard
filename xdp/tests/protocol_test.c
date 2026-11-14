@@ -1,6 +1,6 @@
 /*
- * Native unit tests for the eBPF parsing code (varint.h, protocol.h and the
- * bounds-check macros in common.h).
+ * Native unit tests for the eBPF parsing code (varint.h, protocol.h,
+ * bedrock.h and the helpers in common.h).
  *
  * Compiled for the host (not for BPF) and executed by tests/c_unit_tests.rs
  * as part of `cargo test`, with ASan/UBSan enabled when available. Every
@@ -24,10 +24,16 @@
  */
 #define CONFIG_H
 static volatile __u8 ONLINE_NAMES = 1;
+static volatile __u32 RAKNET_PROTO_MIN = 9;
+static volatile __u32 RAKNET_PROTO_MAX = 11;
+static volatile __u32 RAKNET_OCR1_MIN = 400;
+static volatile __u8 GUARD_TLS = 1;
+static volatile __u8 GUARD_HTTP = 1;
 
 #include "../common.h"
 #include "../varint.h"
 #include "../protocol.h"
+#include "../bedrock.h"
 
 /* ------------------------------------------------------------------------
  * Tiny test framework
@@ -169,12 +175,19 @@ static __u8 run_login(const __u8 *pkt, __u32 len, __s32 protocol)
     return ok;
 }
 
+// location of the server address reported by the last run_handshake()
+static __u32 last_host_offset = 0;
+static __u32 last_host_len = 0;
+
 static __s32 run_handshake(const __u8 *pkt, __u32 len, __s32 *proto_out, __u32 *resume_off)
 {
     __u8 *heap = heap_copy(pkt, len, 0);
     const __u8 *resume = NULL;
+    const __u8 *host = NULL;
     __s32 proto = 0;
-    const __s32 state = inspect_handshake(heap, heap + len, heap + len, &proto, &resume);
+    last_host_len = 0;
+    const __s32 state = inspect_handshake(heap, heap + len, heap + len, &proto, &resume, &host, &last_host_len);
+    last_host_offset = host ? (__u32)(host - heap) : 0;
     if (proto_out)
     {
         *proto_out = proto;
@@ -713,6 +726,393 @@ static void test_login_rejects_length_mismatch(void)
     CHECK(run_login(pkt.b, pkt.n, 765) == 0);
 }
 
+/* ------------------------------------------------------------------------
+ * Host filter hash
+ * --------------------------------------------------------------------- */
+
+// plain FNV-1a, what hash_host() has to produce for an already normalized name
+static __u64 fnv1a64(const char *s)
+{
+    __u64 hash = 0xCBF29CE484222325ULL;
+    for (; *s; s++)
+    {
+        hash = (hash ^ (__u8)*s) * 0x100000001B3ULL;
+    }
+    return hash;
+}
+
+// hashes `len` bytes of `host` on an exact-size heap copy; 0 = rejected
+static __u64 run_hash_host(const char *host, __u32 len)
+{
+    __u8 *heap = heap_copy((const __u8 *)host, len, 0);
+    __u64 hash = 0;
+    const __u8 ok = hash_host(heap, len, heap + len, heap + len, &hash);
+    free(heap);
+    return ok ? hash : 0;
+}
+
+static void test_host_hash(void)
+{
+    // published FNV-1a 64 test vectors; loader/hosts.rs checks the same ones
+    CHECK(fnv1a64("") == 0xCBF29CE484222325ULL);
+    CHECK(fnv1a64("a") == 0xAF63DC4C8601EC8CULL);
+    CHECK(fnv1a64("foobar") == 0x85944171F73967E8ULL);
+
+    const __u64 expected = fnv1a64("mc.example.com");
+    CHECK(run_hash_host("mc.example.com", 14) == expected);
+    CHECK(run_hash_host("MC.Example.COM", 14) == expected);
+    CHECK(run_hash_host("mc.example.com.", 15) == expected);           // SRV target with root dot
+    CHECK(run_hash_host("mc.example.com\0FML\0", 19) == expected);     // Forge marker
+    CHECK(run_hash_host("mc.example.com.\0FML2\0", 21) == expected);
+    CHECK(run_hash_host("mc.example.com\0" "198.51.100.1\0uuid", 32) == expected); // forwarding data
+
+    CHECK(run_hash_host("mc.example.co", 13) != expected);
+    CHECK(run_hash_host("mc.example.com..", 16) == fnv1a64("mc.example.com."));
+    CHECK(run_hash_host("mc..example.com", 15) == fnv1a64("mc..example.com"));
+    CHECK(run_hash_host("mcexamplecom", 12) == fnv1a64("mcexamplecom"));
+    CHECK(run_hash_host("", 0) == fnv1a64(""));
+    CHECK(run_hash_host(".", 1) == fnv1a64(""));
+    // only ASCII letters are folded
+    CHECK(run_hash_host("@[`{", 4) == fnv1a64("@[`{"));
+
+    // length limit: HOST_HASH_MAX characters are fine, one more is not ...
+    char longest[HOST_HASH_MAX + 2];
+    memset(longest, 'a', sizeof(longest));
+    longest[HOST_HASH_MAX] = 0;
+    CHECK(run_hash_host(longest, HOST_HASH_MAX) == fnv1a64(longest));
+    CHECK(run_hash_host(longest, HOST_HASH_MAX + 1) == fnv1a64(longest)); // NUL right at the limit
+    longest[HOST_HASH_MAX] = 'a';
+    CHECK(run_hash_host(longest, HOST_HASH_MAX + 1) == 0);
+    // ... unless everything past the limit is behind a NUL
+    char marked[200];
+    memset(marked, 'x', sizeof(marked));
+    memcpy(marked, "mc.example.com", 15);
+    CHECK(run_hash_host(marked, sizeof(marked)) == expected);
+}
+
+static void test_handshake_reports_host(void)
+{
+    struct buf handshake = build_handshake(763, 14, 2);
+    CHECK(run_handshake(handshake.b, handshake.n, NULL, NULL) == AWAIT_LOGIN);
+    CHECK(last_host_len == 14);
+    // [len=1][id=1][protocol 763=2][host len=1] -> host starts at byte 5
+    CHECK(last_host_offset == 5);
+    CHECK(handshake.b[last_host_offset] == 'h' && handshake.b[last_host_offset + 13] == 'h');
+
+    struct buf empty_host = build_handshake(763, 0, 1);
+    CHECK(run_handshake(empty_host.b, empty_host.n, NULL, NULL) == AWAIT_STATUS_REQUEST);
+    CHECK(last_host_len == 0);
+}
+
+/* ------------------------------------------------------------------------
+ * Bedrock RakNet
+ * --------------------------------------------------------------------- */
+
+static const __u8 MAGIC[16] = {0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe,
+                               0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78};
+
+static void put_bytes(struct buf *p, const __u8 *bytes, __u32 count)
+{
+    memcpy(p->b + p->n, bytes, count);
+    p->n += count;
+}
+
+typedef __u8 (*inspector)(const __u8 *, const __u8 *, const void *);
+
+// runs an inspector on an exact-size heap copy, optionally with slack bytes
+// after the payload (padding of a short ethernet frame)
+static __u8 run_inspector(inspector inspect, const struct buf *pkt, __u32 len, __u32 slack)
+{
+    __u8 *heap = heap_copy(pkt->b, len, slack);
+    const __u8 ok = inspect(heap, heap + len, heap + len + slack);
+    free(heap);
+    return ok;
+}
+
+static __u8 call_ping(const __u8 *p, const __u8 *e, const void *d) { return inspect_raknet_ping(p, e, d); }
+static __u8 call_ocr1(const __u8 *p, const __u8 *e, const void *d) { return inspect_raknet_ocr1(p, e, d); }
+static __u8 call_ocr2(const __u8 *p, const __u8 *e, const void *d) { return inspect_raknet_ocr2(p, e, d); }
+static __u8 call_stun(const __u8 *p, const __u8 *e, const void *d) { return inspect_stun_binding(p, e, d); }
+static __u8 call_guard(const __u8 *p, const __u8 *e, const void *d) { return inspect_guard_data(p, e, d); }
+
+static struct buf build_raknet_ping(void)
+{
+    struct buf pkt = {{0}, 0};
+    put_u8(&pkt, 0x01);
+    put_fill(&pkt, 0x11, 8); // time
+    put_bytes(&pkt, MAGIC, sizeof(MAGIC));
+    put_fill(&pkt, 0x22, 8); // client guid
+    return pkt;
+}
+
+static struct buf build_raknet_ocr1(__u8 protocol, __u32 total_len)
+{
+    struct buf pkt = {{0}, 0};
+    put_u8(&pkt, 0x05);
+    put_bytes(&pkt, MAGIC, sizeof(MAGIC));
+    put_u8(&pkt, protocol);
+    if (total_len > pkt.n)
+    {
+        put_fill(&pkt, 0x00, total_len - pkt.n);
+    }
+    return pkt;
+}
+
+static struct buf build_raknet_ocr2(__u32 address_len)
+{
+    struct buf pkt = {{0}, 0};
+    put_u8(&pkt, 0x07);
+    put_bytes(&pkt, MAGIC, sizeof(MAGIC));
+    put_fill(&pkt, 0x04, address_len);
+    put_fill(&pkt, 0x05, 2); // mtu
+    put_fill(&pkt, 0x22, 8); // client guid
+    return pkt;
+}
+
+static void test_raknet_ping(void)
+{
+    struct buf ping = build_raknet_ping();
+    CHECK(ping.n == RAKNET_PING_LEN);
+    CHECK(run_inspector(call_ping, &ping, ping.n, 0) == 1);
+    CHECK(run_inspector(call_ping, &ping, ping.n, 13) == 1);
+    // every truncation is rejected without reading past the payload
+    for (__u32 len = 0; len < ping.n; len++)
+    {
+        CHECK(run_inspector(call_ping, &ping, len, 0) == 0);
+        CHECK(run_inspector(call_ping, &ping, len, 40) == 0);
+    }
+    // some pingers append data, but not a whole datagram of it
+    put_fill(&ping, 0x00, RAKNET_PING_MAX_LEN - ping.n);
+    CHECK(run_inspector(call_ping, &ping, ping.n, 0) == 1);
+    put_u8(&ping, 0x00);
+    CHECK(run_inspector(call_ping, &ping, ping.n, 0) == 0);
+
+    // every single bit of the magic matters
+    for (__u32 i = 0; i < sizeof(MAGIC); i++)
+    {
+        struct buf bad = build_raknet_ping();
+        bad.b[9 + i] ^= 0x01;
+        CHECK(run_inspector(call_ping, &bad, bad.n, 0) == 0);
+    }
+}
+
+static void test_raknet_open_connection(void)
+{
+    struct buf ocr1 = build_raknet_ocr1(11, 1464);
+    CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n, 0) == 1);
+    ocr1 = build_raknet_ocr1(11, 400);
+    CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n, 0) == 1);
+    CHECK(run_inspector(call_ocr1, &ocr1, 399, 0) == 0);  // below RAKNET_OCR1_MIN
+    CHECK(run_inspector(call_ocr1, &ocr1, 399, 50) == 0); // frame padding does not count
+    CHECK(run_inspector(call_ocr1, &ocr1, 17, 0) == 0);
+    CHECK(run_inspector(call_ocr1, &ocr1, 0, 0) == 0);
+
+    for (__u32 protocol = 0; protocol < 256; protocol++)
+    {
+        ocr1 = build_raknet_ocr1((__u8)protocol, 548);
+        CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n, 0) == (protocol >= 9 && protocol <= 11));
+    }
+    ocr1 = build_raknet_ocr1(11, 548);
+    ocr1.b[16] ^= 0x80; // last byte of the magic
+    CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n, 0) == 0);
+
+    // without a minimum size only the header is required
+    RAKNET_OCR1_MIN = 0;
+    ocr1 = build_raknet_ocr1(11, 0);
+    CHECK(ocr1.n == RAKNET_OCR1_HEADER_LEN);
+    CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n, 0) == 1);
+    CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n - 1, 0) == 0);
+    CHECK(run_inspector(call_ocr1, &ocr1, ocr1.n - 1, 8) == 0);
+    RAKNET_OCR1_MIN = 400;
+
+    // OpenConnectionRequest2 with an IPv4 (7 bytes) or IPv6 (29 bytes)
+    // server address, with or without the 5 cookie bytes
+    const __u32 address_lens[] = {7, 12, 29, 34};
+    for (__u32 i = 0; i < 4; i++)
+    {
+        struct buf ocr2 = build_raknet_ocr2(address_lens[i]);
+        CHECK(run_inspector(call_ocr2, &ocr2, ocr2.n, 0) == 1);
+    }
+    struct buf ocr2 = build_raknet_ocr2(7);
+    CHECK(ocr2.n == RAKNET_OCR2_MIN_LEN);
+    CHECK(run_inspector(call_ocr2, &ocr2, ocr2.n - 1, 0) == 0);
+    CHECK(run_inspector(call_ocr2, &ocr2, ocr2.n - 1, 20) == 0);
+    ocr2.b[1] ^= 0xFF;
+    CHECK(run_inspector(call_ocr2, &ocr2, ocr2.n, 0) == 0);
+    ocr2 = build_raknet_ocr2(35);
+    CHECK(run_inspector(call_ocr2, &ocr2, ocr2.n, 0) == 0); // longer than any real one
+}
+
+/* ------------------------------------------------------------------------
+ * NetherNet: STUN and the first byte demultiplexing
+ * --------------------------------------------------------------------- */
+
+static struct buf build_stun(__u16 type, __u16 attributes_len, __u32 actual_attributes)
+{
+    struct buf pkt = {{0}, 0};
+    put_u8(&pkt, (__u8)(type >> 8));
+    put_u8(&pkt, (__u8)type);
+    put_u8(&pkt, (__u8)(attributes_len >> 8));
+    put_u8(&pkt, (__u8)attributes_len);
+    const __u8 cookie[4] = {0x21, 0x12, 0xA4, 0x42};
+    put_bytes(&pkt, cookie, 4);
+    put_fill(&pkt, 0x33, 12); // transaction id
+    put_fill(&pkt, 0x44, actual_attributes);
+    return pkt;
+}
+
+static void test_stun_binding(void)
+{
+    struct buf stun = build_stun(0x0001, 0, 0);
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 1);
+    CHECK(run_inspector(call_stun, &stun, stun.n, 30) == 1);
+    stun = build_stun(0x0001, 72, 72);
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 1);
+    for (__u32 len = 0; len < stun.n; len++)
+    {
+        CHECK(run_inspector(call_stun, &stun, len, 0) == 0);
+        CHECK(run_inspector(call_stun, &stun, len, 100) == 0);
+    }
+
+    stun = build_stun(0x0101, 72, 72); // binding success response
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 0);
+    stun = build_stun(0x0003, 72, 72); // TURN allocate
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 0);
+    stun = build_stun(0x0001, 70, 70); // attributes are padded to 4 bytes
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 0);
+    stun = build_stun(0x0001, 72, 76); // trailing data
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 0);
+    stun = build_stun(0x0001, 72, 72);
+    stun.b[7] ^= 0x01; // magic cookie
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 0);
+    stun = build_stun(0x0001, 1008, 1008); // larger than any connectivity check
+    CHECK(run_inspector(call_stun, &stun, stun.n, 0) == 0);
+
+    // RFC 7983: 0-3 STUN, 20-63 DTLS; everything else has no business on the port
+    for (__u32 first = 0; first < 256; first++)
+    {
+        CHECK(ice_first_byte_valid((__u8)first) == (first <= 3 || (first >= 20 && first <= 63)));
+    }
+}
+
+/* ------------------------------------------------------------------------
+ * Generic TCP guard
+ * --------------------------------------------------------------------- */
+
+static struct buf build_text(const char *text)
+{
+    struct buf pkt = {{0}, 0};
+    put_bytes(&pkt, (const __u8 *)text, (__u32)strlen(text));
+    return pkt;
+}
+
+static void test_guard_data(void)
+{
+    const __u8 hello_bytes[] = {0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03};
+    struct buf hello = {{0}, 0};
+    put_bytes(&hello, hello_bytes, sizeof(hello_bytes));
+    struct buf get = build_text("GET /v1/join HTTP/1.1\r\n");
+
+    CHECK(run_inspector(call_guard, &hello, hello.n, 0) == 1);
+    CHECK(run_inspector(call_guard, &hello, 6, 0) == 1);
+    CHECK(run_inspector(call_guard, &hello, 5, 0) == 0);
+    CHECK(run_inspector(call_guard, &hello, 5, 10) == 0);
+    CHECK(run_inspector(call_guard, &get, get.n, 0) == 1);
+
+    const char *methods[] = {"POST /x HTTP/1.1", "HEAD / HTTP/1.1", "PUT /x HTTP/1.1", "OPTIONS * HTTP/1.1",
+                             "DELETE /x HTTP/1.1", "PATCH /x HTTP/1.1", "PRI * HTTP/2.0"};
+    for (__u32 i = 0; i < sizeof(methods) / sizeof(methods[0]); i++)
+    {
+        struct buf request = build_text(methods[i]);
+        CHECK(run_inspector(call_guard, &request, request.n, 0) == 1);
+    }
+    const char *garbage[] = {"SSH-2.0-OpenSSH_9.9", "get / http/1.1", "GETX / HTTP/1.1", "\x16\x03\x01\x02\x00\x02 server hello",
+                             "\x17\x03\x03\x00\x10\x01 app data", "\x16\x02\x00\x02\x00\x01 sslv2", "\x16\x03\x05\x02\x00\x01 tls 1.4",
+                             "\x10\x00\x00\x00\x00\x00 mc"};
+    for (__u32 i = 0; i < sizeof(garbage) / sizeof(garbage[0]); i++)
+    {
+        struct buf payload = build_text(garbage[i]);
+        CHECK(run_inspector(call_guard, &payload, payload.n, 0) == 0);
+    }
+
+    GUARD_HTTP = 0;
+    CHECK(run_inspector(call_guard, &hello, hello.n, 0) == 1);
+    CHECK(run_inspector(call_guard, &get, get.n, 0) == 0);
+    GUARD_HTTP = 1;
+    GUARD_TLS = 0;
+    CHECK(run_inspector(call_guard, &hello, hello.n, 0) == 0);
+    CHECK(run_inspector(call_guard, &get, get.n, 0) == 1);
+    GUARD_TLS = 1;
+}
+
+/* ------------------------------------------------------------------------
+ * Retransmit challenge table
+ * --------------------------------------------------------------------- */
+
+#define TICK (1ULL << RETRY_TICK_SHIFT)
+#define MIN_TICKS 3
+#define MAX_TICKS 150
+
+static __u8 retry(__u64 *slot, __u64 hash, __u64 tick)
+{
+    return retry_table_check(slot, hash, tick * TICK, MIN_TICKS, MAX_TICKS);
+}
+
+static void test_retry_table(void)
+{
+    const __u64 a = 0x1111000000000000ULL;
+    const __u64 b = 0x2222000000000000ULL;
+    const __u64 c = 0x3333000000000000ULL;
+    __u64 slot = 0;
+
+    // first sighting, duplicates right after it, then the real retransmit
+    CHECK(retry(&slot, a, 1000) == 0);
+    CHECK(retry(&slot, a, 1000) == 0);
+    CHECK(retry(&slot, a, 1000 + MIN_TICKS - 1) == 0);
+    CHECK(retry(&slot, a, 1000 + MIN_TICKS) == 1);
+    // passing consumes the entry: the next one starts over
+    CHECK(slot == 0);
+    CHECK(retry(&slot, a, 1010) == 0);
+    CHECK(retry(&slot, a, 1010 + MAX_TICKS) == 1);
+
+    // too late: counts as a new first sighting
+    CHECK(retry(&slot, a, 2000) == 0);
+    CHECK(retry(&slot, a, 2000 + MAX_TICKS + 1) == 0);
+    CHECK(retry(&slot, a, 2000 + MAX_TICKS + 1 + MIN_TICKS) == 1);
+
+    // two flows share a slot without disturbing each other
+    slot = 0;
+    CHECK(retry(&slot, a, 3000) == 0);
+    CHECK(retry(&slot, b, 3001) == 0);
+    CHECK(retry(&slot, b, 3010) == 1);
+    CHECK(retry(&slot, a, 3010) == 1);
+    CHECK(slot == 0);
+
+    // a third one replaces the older entry and keeps the younger
+    CHECK(retry(&slot, a, 4000) == 0);
+    CHECK(retry(&slot, b, 4005) == 0);
+    CHECK(retry(&slot, c, 4006) == 0);
+    CHECK(retry(&slot, b, 4010) == 1);
+    CHECK(retry(&slot, c, 4010) == 1);
+    CHECK(retry(&slot, a, 4010) == 0); // was evicted, this is a first sighting again
+
+    // the 16 bit tick counter wraps around
+    slot = 0;
+    CHECK(retry(&slot, a, 0xFFFE) == 0);
+    CHECK(retry(&slot, a, 0x10000 + 10) == 1);
+
+    // a hash whose fingerprint bits are zero still gets a usable entry
+    slot = 0;
+    CHECK(retry(&slot, 0, 5000) == 0);
+    CHECK(slot != 0);
+    CHECK(retry(&slot, 0, 5010) == 1);
+
+    // the mixer spreads neighbouring inputs over the table
+    CHECK(mix64(1) != mix64(2));
+    CHECK((mix64(1) & 0xFFFFF) != (mix64(2) & 0xFFFFF));
+    CHECK(mix64(0) == 0); // fixed point of the finalizer, harmless with a seed
+}
+
 /* --------------------------------------------------------------------- */
 
 int main(void)
@@ -738,6 +1138,13 @@ int main(void)
     test_login_1_19_key_block();
     test_login_uuid_eras();
     test_login_rejects_length_mismatch();
+    test_host_hash();
+    test_handshake_reports_host();
+    test_raknet_ping();
+    test_raknet_open_connection();
+    test_stun_binding();
+    test_guard_data();
+    test_retry_table();
 
     printf("%u checks, %u failures\n", checks_run, checks_failed);
     return checks_failed ? 1 : 0;

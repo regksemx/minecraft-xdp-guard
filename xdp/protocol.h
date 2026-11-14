@@ -62,13 +62,81 @@
 #define LOGIN_DATA_MAX (LOGIN_NAME_LEN_MAX + LOGIN_NAME_DATA_MAX + LOGIN_PUBLIC_KEY_MAX + LOGIN_HAS_UUID_LEN + UUID_LEN)
 
 /*
+ * Host filter: the server address of the handshake is compared by hash
+ * against the allowed_hosts map, so the filter never needs string compares.
+ *
+ * The hash is FNV-1a (64 bit) over the normalized host: ASCII lowercased,
+ * cut at the first NUL (Forge appends "\0FML\0"-style markers, proxies
+ * append forwarding data) and without one trailing dot (clients resolving a
+ * SRV record send the target with its root dot). loader/hosts.rs computes
+ * the very same hash for the configured names.
+ */
+#define HOST_HASH_MAX 64 // longest host name the filter can match
+#define FNV64_OFFSET 0xCBF29CE484222325ULL
+#define FNV64_PRIME 0x100000001B3ULL
+
+// hashes the host name at `host`; returns 0 if it is out of bounds or longer
+// than HOST_HASH_MAX, 1 on success
+static __always_inline __u8 hash_host(const __u8 *host, const __u32 host_len, const __u8 *payload_end, const void *data_end, __u64 *hash_out)
+{
+    __u64 hash = FNV64_OFFSET;
+    __u8 pending_dot = 0;
+
+    for (__u32 i = 0; i <= HOST_HASH_MAX; i++)
+    {
+        if (i >= host_len)
+        {
+            break;
+        }
+        const __u8 *byte_ptr = host + i;
+        CHECK_BOUNDS_OR_RETURN(byte_ptr, 1, payload_end, data_end);
+        __u8 c = *byte_ptr;
+        if (c == 0)
+        {
+            break;
+        }
+        if (i == HOST_HASH_MAX)
+        {
+            return 0; // more than HOST_HASH_MAX characters
+        }
+        if (c == '.')
+        {
+            // a dot is only hashed once another character follows it, which
+            // drops exactly one trailing dot
+            if (pending_dot)
+            {
+                hash = (hash ^ '.') * FNV64_PRIME;
+            }
+            pending_dot = 1;
+            continue;
+        }
+        if (pending_dot)
+        {
+            hash = (hash ^ '.') * FNV64_PRIME;
+            pending_dot = 0;
+        }
+        if (c >= 'A' && c <= 'Z')
+        {
+            c |= 0x20;
+        }
+        hash = (hash ^ c) * FNV64_PRIME;
+    }
+
+    *hash_out = hash;
+    return 1;
+}
+
+/*
  * Validates the handshake packet and returns the resulting connection state,
  * or 0 if the packet is invalid. A client may append the status request or
  * login packet to the same TCP segment (also seen after retransmissions); in
  * that case a DIRECT_READ_* state is returned and *resume_cursor points at
  * the remaining payload so the caller can continue inspecting it.
+ *
+ * *host and *host_len receive the location of the server address inside
+ * the packet, for the host filter (see hash_host).
  */
-static __always_inline __s32 inspect_handshake(const __u8 *cursor, const __u8 *payload_end, const void *data_end, __s32 *protocol_version, const __u8 **resume_cursor)
+static __always_inline __s32 inspect_handshake(const __u8 *cursor, const __u8 *payload_end, const void *data_end, __s32 *protocol_version, const __u8 **resume_cursor, const __u8 **host, __u32 *host_len_out)
 {
     CHECK_BOUNDS_OR_RETURN(cursor, 1, payload_end, data_end);
     // pre-1.7 clients open with 0xFE instead of a length prefix
@@ -95,8 +163,14 @@ static __always_inline __s32 inspect_handshake(const __u8 *cursor, const __u8 *p
 
     // host length, then skip the host data
     READ_VARINT_OR_RETURN(varint, cursor, payload_end, data_end, VARINT_SIZE(HANDSHAKE_HOST_DATA_MAX));
-    ASSERT_IN_RANGE_OR_RETURN(varint.value, HANDSHAKE_HOST_DATA_MIN, HANDSHAKE_HOST_DATA_MAX);
-    SKIP_OR_RETURN(cursor, varint.value, payload_end, data_end);
+    // the barrier pins the length to one register, so the verifier applies
+    // the range check below to the very value that is added to the cursor
+    __u32 host_len = (__u32)varint.value;
+    barrier_var(host_len);
+    ASSERT_OR_RETURN(host_len <= HANDSHAKE_HOST_DATA_MAX);
+    *host = cursor;
+    *host_len_out = host_len;
+    SKIP_OR_RETURN(cursor, host_len, payload_end, data_end);
 
     // server port
     SKIP_OR_RETURN(cursor, HANDSHAKE_PORT_LEN, payload_end, data_end);

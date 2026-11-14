@@ -1,5 +1,6 @@
 mod config;
 mod ebpf;
+mod hosts;
 mod logging;
 mod metrics;
 mod shutdown;
@@ -22,6 +23,8 @@ Arguments:
 Options:
   -c, --config <FILE>  Path to the TOML configuration file, created with
                        defaults if missing [default: config.toml]
+      --reset-state    Forget verified connections and known IPs kept from
+                       an earlier run before starting
       --license        Print license information
   -h, --help           Print help
   -V, --version        Print version";
@@ -34,15 +37,18 @@ struct Args {
     config: String,
     /// Print license information instead of running.
     license: bool,
+    /// Remove the pinned state maps before loading.
+    reset_state: bool,
 }
 
 /// Hand-rolled argument parsing (a CLI library would double the binary size
-/// for three options). Prints help/version/errors and exits where appropriate.
+/// for a handful of options). Prints help/version/errors and exits where appropriate.
 fn parse_args() -> Args {
     let mut args = Args {
         interface: None,
         config: "config.toml".into(),
         license: false,
+        reset_state: false,
     };
 
     let mut argv = std::env::args().skip(1);
@@ -61,6 +67,7 @@ fn parse_args() -> Args {
                 std::process::exit(0);
             }
             "--license" => args.license = true,
+            "--reset-state" => args.reset_state = true,
             "-c" | "--config" => match argv.next() {
                 Some(value) => args.config = value,
                 None => invalid(format!("missing value for '{arg} <FILE>'")),
@@ -131,12 +138,20 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
         .as_deref()
         .context("interface is required unless --license is specified")?;
 
+    if args.reset_state {
+        ebpf::remove_state(config);
+    }
+
     // keep the handle alive until the end of this function: dropping it
     // detaches the XDP program
     let mut ebpf = ebpf::load_and_attach(interface, config)?;
     let stats_thread = metrics::start(&mut ebpf, config, shutdown)?;
 
     shutdown.wait();
+
+    if !config.xdp.keep_state {
+        ebpf::remove_state(config);
+    }
 
     if let Some(handle) = stats_thread {
         handle

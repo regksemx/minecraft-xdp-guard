@@ -2,42 +2,142 @@ use anyhow::{Context, Result, bail};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::Ipv4Addr;
 use std::path::Path;
+
+use crate::hosts;
 
 /// Default configuration file written on first run, with documentation for
 /// every option. Mirrors [`Config::default`].
 pub const DEFAULT_CONFIG_TOML: &str = r#"# Minecraft XDP filter configuration.
 # This file is applied at load time; restart the loader after editing.
 # Every option is listed with its default value.
+#
+# A port range with start_port = 0 switches that protection off. Ranges are
+# inclusive; use the same value twice to protect a single port.
 
-[filter]
-# Inclusive TCP destination port range to protect.
-# Use the same value for both to protect a single port.
+[java]
+# Minecraft Java Edition (TCP). Every connection has to send a valid
+# handshake followed by either status + ping or a login.
 start_port = 25565
 end_port = 25565
-
-# SYN connection throttle: max new connections (SYNs) per source IP within
-# each throttle window (see hit_count_reset_secs). Set to 0 to disable
-# throttling.
-hit_count = 10
-
-# Length of the throttle window in seconds, enforced inside the eBPF program:
-# each source IP gets its own window starting at its first SYN, and the counter
-# resets in-kernel once the window expires. e.g. hit_count = 10 with
-# hit_count_reset_secs = 3 allows 10 new connections per source IP every
-# 3 seconds. Must be between 1 and 86400 (one day).
-hit_count_reset_secs = 3
-
-# Idle timeout for verified player connections in seconds, enforced inside the
-# eBPF program: a connection's entry is removed after one to two timeout
-# intervals without packets, so a returning client has to redo the handshake.
-# Must be between 1 and 86400 (one day).
-player_idle_timeout_secs = 60
 
 # Enforce online-mode username rules during login inspection.
 # true  -> usernames are limited to 16 characters (Mojang online mode).
 # false -> allow the protocol maximum (offline / cracked servers).
 online_names = true
+
+# Host names players may connect with (the address they typed, or the target
+# of your SRV record). Handshakes for any other host are dropped, which stops
+# bots that scan or attack the bare IP address. Not case sensitive; list the
+# IP address too if players may use it. Empty = any host is accepted.
+# hosts = ["mc.example.com", "play.example.com"]
+hosts = []
+
+# Protocol versions allowed to log in (0 = no bound), e.g. protocol_min = 754
+# refuses clients older than 1.16.5. Server list pings are never restricted.
+protocol_min = 0
+protocol_max = 0
+
+[tcp_guard]
+# Generic guard for other TCP services where the client talks first, e.g.
+# the NetherNet signaling port of Bedrock (TLS / HTTP on TCP 19132): only
+# clients whose first payload opens one of the allowed protocols get through.
+start_port = 0
+end_port = 0
+allow_tls = true
+allow_http = true
+
+[bedrock]
+# Minecraft Bedrock Edition (RakNet over UDP), usually port 19132. A session
+# has to open with OpenConnectionRequest 1 and 2; only then game traffic is
+# accepted from that address.
+start_port = 0
+end_port = 0
+
+# RakNet protocol versions accepted in OpenConnectionRequest1.
+raknet_protocol_min = 9
+raknet_protocol_max = 11
+
+# Minimum size of OpenConnectionRequest1 in bytes. Clients pad it to the MTU
+# they probe (at least 548 bytes); floods usually send it bare.
+open_request_min_size = 400
+
+[nethernet]
+# NetherNet / WebRTC data channels of Bedrock (UDP). A session has to open
+# with a STUN binding request; afterwards only STUN and DTLS are accepted.
+ice_start_port = 0
+ice_end_port = 0
+
+[limits]
+# Limits per source IP, counted within windows of window_secs seconds.
+# 0 switches a limit off.
+window_secs = 3
+
+# New TCP connections (SYNs).
+syn_per_ip = 10
+# Java status requests (server list pings).
+status_per_ip = 10
+# Bedrock unconnected pings (server list pings).
+pings_per_ip = 20
+# New Bedrock / NetherNet sessions.
+udp_sessions_per_ip = 8
+
+# Verified connections are forgotten after this many seconds without a
+# packet; the client then has to connect again. Must be between 2 and 86400.
+tcp_idle_secs = 60
+udp_idle_secs = 30
+
+# Packets per second one verified connection may send (0 = unlimited). A
+# player sends a few hundred at most; anything above is dropped.
+tcp_flow_pps = 0
+udp_flow_pps = 0
+
+[attack]
+# Retransmit challenge for source IPs the filter has never seen: their first
+# connection attempt is dropped and only its retransmit is let through. Real
+# clients retransmit by themselves (TCP after 1s, Bedrock after ~0.5s), so
+# all they notice is a slightly slower first connect; spoofed floods never
+# retransmit and are dropped for the cost of one array access per packet.
+# "auto"   -> only while more than challenge_new_ips_per_sec unknown IPs
+#             per second show up. Recommended.
+# "always" -> every unknown IP, all the time.
+# "off"    -> never.
+challenge = "auto"
+challenge_new_ips_per_sec = 400
+# How long the challenge stays active after the flood ended.
+challenge_hold_secs = 30
+# A retransmit is accepted this long after the first attempt.
+retry_min_ms = 200
+retry_max_ms = 10000
+# Slots of the challenge table (power of two, 8 bytes each). More slots keep
+# first connects fast during bigger floods: at 1 million spoofed packets per
+# second a table of 4194304 slots still lets about 9 of 10 newcomers in on
+# their first retransmit.
+retry_table_slots = 1048576
+
+# Budgets: how much new work per second the server accepts from IPs that are
+# not proven players, in total. 0 = unlimited. Whatever exceeds a budget is
+# dropped before it reaches the server, so a bot flood can not take more than
+# the budget away from it.
+syn_budget = 0
+login_budget = 0
+status_budget = 0
+ping_budget = 0
+udp_session_budget = 0
+
+# An IP becomes a proven player once one of its game connections lived for
+# good_after_secs (0 = never). Proven players are not subject to the budgets
+# above, so they can always reconnect during an attack.
+good_after_secs = 180
+good_ttl_hours = 72
+
+[lists]
+# IPv4 addresses or networks ("203.0.113.7", "198.51.100.0/24").
+# allow: never inspected or limited on the protected ports (monitoring,
+#        your own proxies). deny: always dropped on the protected ports.
+allow = []
+deny = []
 
 [xdp]
 # How the filter attaches to the network interface.
@@ -49,21 +149,43 @@ online_names = true
 #             slower; use it when the driver misbehaves in native mode.
 mode = "auto"
 
-# Sizes of the in-kernel connection tables below. The maps are preallocated,
-# so higher limits cost kernel memory up front, not per connection.
+# The filter only inspects IPv4. Set this to true if the protected services
+# are reachable over IPv6 as well: IPv6 packets to the protected ports are
+# dropped then, instead of bypassing the filter.
+drop_ipv6 = false
 
-# Connections that have not finished the Minecraft handshake yet. The
-# least-recently-used entry is evicted when the table is full, bounding how
-# many half-open connections an attacker can keep alive at once.
+# Keep the tables of verified connections and known IPs pinned in state_dir,
+# so that restarting the loader does not disconnect anyone. They stay there
+# (and keep their memory) after the loader exits; run the loader with
+# --reset-state to start from scratch.
+keep_state = true
+state_dir = "/sys/fs/bpf/minecraft-xdp"
+
+# Connections that already existed when the filter was attached (first start,
+# or the gap during a restart) are unknown to it. For adopt_secs seconds
+# after the start such connections are adopted instead of dropped.
+# "socket" -> TCP only if the kernel of this machine has that connection
+#             (the server or proxy runs on this host, not in a container
+#             behind NAT). UDP sessions are adopted if they look valid.
+# "blind"  -> everything that looks like an established connection.
+# "off"    -> nothing; players connected at that moment have to reconnect.
+adopt = "socket"
+adopt_secs = 30
+
+# Sizes of the in-kernel tables below. The maps are preallocated, so higher
+# limits cost kernel memory up front, not per connection. When a table is
+# full its least recently used entry is replaced.
+
+# TCP connections that have not finished inspection yet.
 max_pending_connections = 16384
-
-# Verified player connections. New connections cannot be verified while this
-# table is full, so keep it well above the expected player count.
-max_player_connections = 65535
-
-# Source IPs tracked by the SYN throttle. When the table is full, new SYNs
-# are dropped (fail closed) until expired windows are reclaimed in-kernel.
-max_throttled_ips = 65535
+# Verified TCP connections; keep it well above the expected player count.
+max_player_connections = 65536
+# Bedrock clients between their two connection requests.
+max_pending_udp_sessions = 16384
+# Verified Bedrock / NetherNet sessions.
+max_udp_sessions = 65536
+# Source IPs with rate limit counters and the proven player mark.
+max_tracked_ips = 262144
 
 [metrics]
 # Collect packet statistics inside the eBPF program. Required for any metrics
@@ -94,75 +216,328 @@ file_max_mb = 100
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub filter: FilterConfig,
+    pub java: JavaConfig,
+    pub tcp_guard: TcpGuardConfig,
+    pub bedrock: BedrockConfig,
+    pub nethernet: NetherNetConfig,
+    pub limits: LimitsConfig,
+    pub attack: AttackConfig,
+    pub lists: ListsConfig,
     pub xdp: XdpConfig,
     pub metrics: MetricsConfig,
     pub logging: LoggingConfig,
 }
 
-/// `[filter]` — which traffic is filtered and how strictly.
-///
-/// These fields are pushed into the eBPF program's `volatile const` globals at
-/// load time; see `load_and_attach` in `loader/ebpf.rs`.
+/// `[java]` — Minecraft Java Edition (TCP).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct FilterConfig {
-    /// First port of the inclusive filtered range. Maps to `START_PORT`.
+pub struct JavaConfig {
+    /// First port of the inclusive range, 0 = off. Maps to `JAVA_START_PORT`.
     pub start_port: u16,
-    /// Last port of the inclusive filtered range. Maps to `END_PORT`.
+    /// Last port of the inclusive range. Maps to `JAVA_END_PORT`.
     pub end_port: u16,
-    /// Max SYNs per source IP per throttle window (0 = disabled). Maps to `HIT_COUNT`.
-    pub hit_count: u32,
-    /// Throttle window length in seconds; each IP's SYN counter resets in-kernel
-    /// once its window expires. Maps to `HIT_COUNT_RESET_NS` (converted to ns).
-    pub hit_count_reset_secs: u64,
-    /// Idle timeout for verified connections in seconds; an entry is removed
-    /// in-kernel after one to two intervals without packets. Maps to
-    /// `PLAYER_IDLE_NS` (converted to ns).
-    pub player_idle_timeout_secs: u64,
     /// Enforce online-mode (<= 16 char) usernames. Maps to `ONLINE_NAMES`.
     pub online_names: bool,
+    /// Host names accepted in the handshake; empty = any. Fills the
+    /// `allowed_hosts` map and sets `HOST_FILTER`.
+    pub hosts: Vec<String>,
+    /// Lowest protocol version allowed to log in, 0 = any. Maps to `JAVA_PROTO_MIN`.
+    pub protocol_min: i32,
+    /// Highest protocol version allowed to log in, 0 = any. Maps to `JAVA_PROTO_MAX`.
+    pub protocol_max: i32,
 }
 
-impl Default for FilterConfig {
+impl Default for JavaConfig {
     fn default() -> Self {
         Self {
             start_port: 25565,
             end_port: 25565,
-            hit_count: 10,
-            hit_count_reset_secs: 3,
-            player_idle_timeout_secs: 60,
             online_names: true,
+            hosts: Vec::new(),
+            protocol_min: 0,
+            protocol_max: 0,
         }
     }
 }
 
-/// `[xdp]` — how the program attaches and the capacity of its maps.
+/// `[tcp_guard]` — generic guard for client-speaks-first TCP services.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TcpGuardConfig {
+    /// First port of the inclusive range, 0 = off. Maps to `GUARD_START_PORT`.
+    pub start_port: u16,
+    /// Last port of the inclusive range. Maps to `GUARD_END_PORT`.
+    pub end_port: u16,
+    /// Accept a TLS ClientHello as first payload. Maps to `GUARD_TLS`.
+    pub allow_tls: bool,
+    /// Accept a plain HTTP request as first payload. Maps to `GUARD_HTTP`.
+    pub allow_http: bool,
+}
+
+impl Default for TcpGuardConfig {
+    fn default() -> Self {
+        Self {
+            start_port: 0,
+            end_port: 0,
+            allow_tls: true,
+            allow_http: true,
+        }
+    }
+}
+
+/// `[bedrock]` — Minecraft Bedrock Edition (RakNet over UDP).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BedrockConfig {
+    /// First port of the inclusive range, 0 = off. Maps to `RAKNET_START_PORT`.
+    pub start_port: u16,
+    /// Last port of the inclusive range. Maps to `RAKNET_END_PORT`.
+    pub end_port: u16,
+    /// Lowest accepted RakNet protocol version. Maps to `RAKNET_PROTO_MIN`.
+    pub raknet_protocol_min: u8,
+    /// Highest accepted RakNet protocol version. Maps to `RAKNET_PROTO_MAX`.
+    pub raknet_protocol_max: u8,
+    /// Minimum size of OpenConnectionRequest1. Maps to `RAKNET_OCR1_MIN`.
+    pub open_request_min_size: u32,
+}
+
+impl Default for BedrockConfig {
+    fn default() -> Self {
+        Self {
+            start_port: 0,
+            end_port: 0,
+            raknet_protocol_min: 9,
+            raknet_protocol_max: 11,
+            open_request_min_size: 400,
+        }
+    }
+}
+
+/// `[nethernet]` — NetherNet WebRTC data channels (UDP).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetherNetConfig {
+    /// First ICE port of the inclusive range, 0 = off. Maps to `ICE_START_PORT`.
+    pub ice_start_port: u16,
+    /// Last ICE port of the inclusive range. Maps to `ICE_END_PORT`.
+    pub ice_end_port: u16,
+}
+
+/// `[limits]` — per source ip limits and the lifetime of verified flows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LimitsConfig {
+    /// Length of the per ip window in seconds. Maps to `LIMIT_WINDOW_NS`.
+    pub window_secs: u64,
+    /// Maps to `SYN_HITS`.
+    pub syn_per_ip: u32,
+    /// Maps to `STATUS_HITS`.
+    pub status_per_ip: u32,
+    /// Maps to `PING_HITS`.
+    pub pings_per_ip: u32,
+    /// Maps to `UDP_OPEN_HITS`.
+    pub udp_sessions_per_ip: u32,
+    /// Maps to `TCP_IDLE_NS`.
+    pub tcp_idle_secs: u64,
+    /// Maps to `UDP_IDLE_NS`.
+    pub udp_idle_secs: u64,
+    /// Maps to `TCP_FLOW_PPS`.
+    pub tcp_flow_pps: u32,
+    /// Maps to `UDP_FLOW_PPS`.
+    pub udp_flow_pps: u32,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            window_secs: 3,
+            syn_per_ip: 10,
+            status_per_ip: 10,
+            pings_per_ip: 20,
+            udp_sessions_per_ip: 8,
+            tcp_idle_secs: 60,
+            udp_idle_secs: 30,
+            tcp_flow_pps: 0,
+            udp_flow_pps: 0,
+        }
+    }
+}
+
+/// When unknown source ips have to pass the retransmit challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChallengeMode {
+    Off,
+    Auto,
+    Always,
+}
+
+/// `[attack]` — what happens while the server is flooded.
 ///
-/// The capacities override the placeholder `max_entries` of the corresponding
-/// map in `xdp/minecraft_filter.c` at load time.
+/// All totals per second are split evenly over the cpus before they are
+/// handed to the eBPF program, which keeps its counters per cpu.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AttackConfig {
+    /// Maps to `CHALLENGE_MODE`.
+    pub challenge: ChallengeMode,
+    /// Maps to `CHALLENGE_PPS` (per cpu).
+    pub challenge_new_ips_per_sec: u32,
+    /// Maps to `CHALLENGE_HOLD_NS`.
+    pub challenge_hold_secs: u64,
+    /// Maps to `RETRY_MIN_TICKS`.
+    pub retry_min_ms: u64,
+    /// Maps to `RETRY_MAX_TICKS`.
+    pub retry_max_ms: u64,
+    /// Capacity of `retry_table`, sets `RETRY_MASK`.
+    pub retry_table_slots: u32,
+    /// Maps to `SYN_BUDGET` (per cpu).
+    pub syn_budget: u32,
+    /// Maps to `LOGIN_BUDGET` (per cpu).
+    pub login_budget: u32,
+    /// Maps to `STATUS_BUDGET` (per cpu).
+    pub status_budget: u32,
+    /// Maps to `PING_BUDGET` (per cpu).
+    pub ping_budget: u32,
+    /// Maps to `UDP_OPEN_BUDGET` (per cpu).
+    pub udp_session_budget: u32,
+    /// Maps to `GOOD_AFTER_NS`.
+    pub good_after_secs: u64,
+    /// Maps to `GOOD_TTL_NS`.
+    pub good_ttl_hours: u64,
+}
+
+impl Default for AttackConfig {
+    fn default() -> Self {
+        Self {
+            challenge: ChallengeMode::Auto,
+            challenge_new_ips_per_sec: 400,
+            challenge_hold_secs: 30,
+            retry_min_ms: 200,
+            retry_max_ms: 10_000,
+            retry_table_slots: 1 << 20,
+            syn_budget: 0,
+            login_budget: 0,
+            status_budget: 0,
+            ping_budget: 0,
+            udp_session_budget: 0,
+            good_after_secs: 180,
+            good_ttl_hours: 72,
+        }
+    }
+}
+
+/// `[lists]` — source networks that bypass or never pass the filter.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ListsConfig {
+    /// Fills the `allow_v4` map.
+    pub allow: Vec<String>,
+    /// Fills the `deny_v4` map.
+    pub deny: Vec<String>,
+}
+
+/// An IPv4 network of the allow/deny lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv4Net {
+    /// Network address with the host bits cleared.
+    pub addr: Ipv4Addr,
+    pub prefix_len: u32,
+}
+
+impl Ipv4Net {
+    /// Parses `a.b.c.d` or `a.b.c.d/len`; host bits are cleared.
+    pub fn parse(text: &str) -> Result<Self> {
+        let (addr, prefix_len) = match text.split_once('/') {
+            Some((addr, len)) => (
+                addr,
+                len.trim()
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid prefix length in '{text}'"))?,
+            ),
+            None => (text, 32),
+        };
+        if prefix_len > 32 {
+            bail!("prefix length of '{text}' must be between 0 and 32");
+        }
+        let addr: Ipv4Addr = addr
+            .trim()
+            .parse()
+            .with_context(|| format!("'{text}' is not an IPv4 address or network"))?;
+        let mask = if prefix_len == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix_len)
+        };
+        Ok(Self {
+            addr: Ipv4Addr::from(u32::from(addr) & mask),
+            prefix_len,
+        })
+    }
+}
+
+impl ListsConfig {
+    pub fn allow_nets(&self) -> Result<Vec<Ipv4Net>> {
+        self.allow.iter().map(|s| Ipv4Net::parse(s)).collect()
+    }
+
+    pub fn deny_nets(&self) -> Result<Vec<Ipv4Net>> {
+        self.deny.iter().map(|s| Ipv4Net::parse(s)).collect()
+    }
+}
+
+/// What to do with flows that existed before the filter was attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AdoptMode {
+    Off,
+    Socket,
+    Blind,
+}
+
+/// `[xdp]` — how the program attaches, its persistent state and the
+/// capacity of its maps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct XdpConfig {
     /// XDP attach mode.
     pub mode: ConfigXdpMode,
-    /// Capacity of `conntrack_map`: concurrent unverified (mid-handshake)
-    /// connections, oldest evicted when full.
+    /// Drop IPv6 traffic to the protected ports. Maps to `IPV6_PROTECT`.
+    pub drop_ipv6: bool,
+    /// Pin the state maps so they survive a restart of the loader.
+    pub keep_state: bool,
+    /// Directory (on a bpf filesystem) the state maps are pinned in.
+    pub state_dir: String,
+    /// Maps to `ADOPT_MODE`.
+    pub adopt: AdoptMode,
+    /// Sets `ADOPT_UNTIL_NS` to this many seconds after the start.
+    pub adopt_secs: u64,
+    /// Capacity of `pending_tcp`.
     pub max_pending_connections: u32,
-    /// Capacity of `player_connection_map`: concurrent verified connections.
+    /// Capacity of `verified_tcp`.
     pub max_player_connections: u32,
-    /// Capacity of `connection_throttle`: source IPs with an active throttle
-    /// window.
-    pub max_throttled_ips: u32,
+    /// Capacity of `pending_udp`.
+    pub max_pending_udp_sessions: u32,
+    /// Capacity of `verified_udp`.
+    pub max_udp_sessions: u32,
+    /// Capacity of `ip_table`.
+    pub max_tracked_ips: u32,
 }
 
 impl Default for XdpConfig {
     fn default() -> Self {
         Self {
             mode: ConfigXdpMode::Auto,
+            drop_ipv6: false,
+            keep_state: true,
+            state_dir: "/sys/fs/bpf/minecraft-xdp".into(),
+            adopt: AdoptMode::Socket,
+            adopt_secs: 30,
             max_pending_connections: 16384,
-            max_player_connections: 65535,
-            max_throttled_ips: 65535,
+            max_player_connections: 65536,
+            max_pending_udp_sessions: 16384,
+            max_udp_sessions: 65536,
+            max_tracked_ips: 262_144,
         }
     }
 }
@@ -283,8 +658,36 @@ impl Config {
     }
 
     /// Reject values the eBPF program or loader cannot represent sensibly.
-    fn validate(&self) -> Result<()> {
-        self.filter.validate()?;
+    pub fn validate(&self) -> Result<()> {
+        let java = check_ports("[java]", self.java.start_port, self.java.end_port)?;
+        let guard = check_ports(
+            "[tcp_guard]",
+            self.tcp_guard.start_port,
+            self.tcp_guard.end_port,
+        )?;
+        let raknet = check_ports("[bedrock]", self.bedrock.start_port, self.bedrock.end_port)?;
+        let ice = check_ports(
+            "[nethernet] ice",
+            self.nethernet.ice_start_port,
+            self.nethernet.ice_end_port,
+        )?;
+        if java.is_none() && guard.is_none() && raknet.is_none() && ice.is_none() {
+            bail!("nothing to protect: every port range is switched off");
+        }
+        if overlap(java, guard) {
+            bail!("the TCP port ranges of [java] and [tcp_guard] must not overlap");
+        }
+        if overlap(raknet, ice) {
+            bail!("the UDP port ranges of [bedrock] and [nethernet] must not overlap");
+        }
+
+        self.java.validate()?;
+        self.tcp_guard.validate()?;
+        self.bedrock.validate()?;
+        self.limits.validate()?;
+        self.attack.validate()?;
+        self.lists.allow_nets().context("[lists] allow")?;
+        self.lists.deny_nets().context("[lists] deny")?;
         self.xdp.validate()?;
         self.metrics.validate()?;
         self.logging.validate()
@@ -299,54 +702,128 @@ fn check_range(option: &str, value: u64, min: u64, max: u64) -> Result<()> {
     Ok(())
 }
 
-impl FilterConfig {
-    fn validate(&self) -> Result<()> {
-        if self.start_port == 0 {
-            bail!("[filter] start_port must be >= 1");
+/// Validates one port range; `None` means the range is switched off.
+fn check_ports(section: &str, start: u16, end: u16) -> Result<Option<(u16, u16)>> {
+    if start == 0 {
+        if end != 0 {
+            bail!("{section} start_port is 0 (off) but end_port is {end}");
         }
-        if self.start_port > self.end_port {
+        return Ok(None);
+    }
+    if start > end {
+        bail!("{section} start_port ({start}) must be <= end_port ({end})");
+    }
+    Ok(Some((start, end)))
+}
+
+fn overlap(a: Option<(u16, u16)>, b: Option<(u16, u16)>) -> bool {
+    match (a, b) {
+        (Some((a_start, a_end)), Some((b_start, b_end))) => a_start <= b_end && b_start <= a_end,
+        _ => false,
+    }
+}
+
+impl JavaConfig {
+    fn validate(&self) -> Result<()> {
+        if self.protocol_min < 0 || self.protocol_max < 0 {
+            bail!("[java] protocol_min and protocol_max must not be negative");
+        }
+        if self.protocol_max != 0 && self.protocol_min > self.protocol_max {
             bail!(
-                "[filter] start_port ({}) must be <= end_port ({})",
-                self.start_port,
-                self.end_port
+                "[java] protocol_min ({}) must be <= protocol_max ({})",
+                self.protocol_min,
+                self.protocol_max
+            );
+        }
+        check_range("[java] hosts (entries)", self.hosts.len() as u64, 0, 1024)?;
+        for host in &self.hosts {
+            hosts::normalize(host).with_context(|| format!("[java] hosts: '{host}'"))?;
+        }
+        Ok(())
+    }
+}
+
+impl TcpGuardConfig {
+    fn validate(&self) -> Result<()> {
+        if self.start_port != 0 && !self.allow_tls && !self.allow_http {
+            bail!("[tcp_guard] allows neither TLS nor HTTP, nothing could connect");
+        }
+        Ok(())
+    }
+}
+
+impl BedrockConfig {
+    fn validate(&self) -> Result<()> {
+        if self.raknet_protocol_min > self.raknet_protocol_max {
+            bail!(
+                "[bedrock] raknet_protocol_min ({}) must be <= raknet_protocol_max ({})",
+                self.raknet_protocol_min,
+                self.raknet_protocol_max
             );
         }
         check_range(
-            "[filter] hit_count_reset_secs",
-            self.hit_count_reset_secs,
+            "[bedrock] open_request_min_size",
+            self.open_request_min_size as u64,
+            0,
+            1464,
+        )
+    }
+}
+
+impl LimitsConfig {
+    fn validate(&self) -> Result<()> {
+        check_range("[limits] window_secs", self.window_secs, 1, 86_400)?;
+        // the idle check runs on a one second grid, so 1 could expire a
+        // connection that is merely between two packets
+        check_range("[limits] tcp_idle_secs", self.tcp_idle_secs, 2, 86_400)?;
+        check_range("[limits] udp_idle_secs", self.udp_idle_secs, 2, 86_400)
+    }
+}
+
+impl AttackConfig {
+    fn validate(&self) -> Result<()> {
+        check_range(
+            "[attack] challenge_hold_secs",
+            self.challenge_hold_secs,
             1,
             86_400,
         )?;
+        check_range("[attack] retry_min_ms", self.retry_min_ms, 70, 900)?;
+        check_range("[attack] retry_max_ms", self.retry_max_ms, 2_000, 60_000)?;
         check_range(
-            "[filter] player_idle_timeout_secs",
-            self.player_idle_timeout_secs,
-            1,
-            86_400,
-        )
+            "[attack] retry_table_slots",
+            self.retry_table_slots as u64,
+            1 << 10,
+            1 << 26,
+        )?;
+        if !self.retry_table_slots.is_power_of_two() {
+            bail!(
+                "[attack] retry_table_slots must be a power of two (got {})",
+                self.retry_table_slots
+            );
+        }
+        check_range("[attack] good_after_secs", self.good_after_secs, 0, 86_400)?;
+        check_range("[attack] good_ttl_hours", self.good_ttl_hours, 1, 24 * 365)
     }
 }
 
 impl XdpConfig {
     fn validate(&self) -> Result<()> {
-        const MAX_ENTRIES: u64 = 1 << 20;
-        check_range(
-            "[xdp] max_pending_connections",
-            self.max_pending_connections as u64,
-            1,
-            MAX_ENTRIES,
-        )?;
-        check_range(
-            "[xdp] max_player_connections",
-            self.max_player_connections as u64,
-            1,
-            MAX_ENTRIES,
-        )?;
-        check_range(
-            "[xdp] max_throttled_ips",
-            self.max_throttled_ips as u64,
-            1,
-            MAX_ENTRIES,
-        )
+        const MAX_ENTRIES: u64 = 1 << 22;
+        for (option, value) in [
+            ("max_pending_connections", self.max_pending_connections),
+            ("max_player_connections", self.max_player_connections),
+            ("max_pending_udp_sessions", self.max_pending_udp_sessions),
+            ("max_udp_sessions", self.max_udp_sessions),
+            ("max_tracked_ips", self.max_tracked_ips),
+        ] {
+            check_range(&format!("[xdp] {option}"), value as u64, 1, MAX_ENTRIES)?;
+        }
+        check_range("[xdp] adopt_secs", self.adopt_secs, 0, 3_600)?;
+        if self.keep_state && self.state_dir.trim().is_empty() {
+            bail!("[xdp] state_dir must not be empty when keep_state is enabled");
+        }
+        Ok(())
     }
 }
 
@@ -366,10 +843,14 @@ impl LoggingConfig {
 mod tests {
     use super::*;
 
+    fn parse(toml: &str) -> Config {
+        toml::from_str(toml).expect("test toml parses")
+    }
+
     #[test]
     fn embedded_default_matches_struct_default() {
         // The documented template shipped to users must parse and agree with
-        // Config::default (metrics addr is commented out -> None).
+        // Config::default (commented out options -> defaults).
         let parsed: Config = toml::from_str(DEFAULT_CONFIG_TOML).expect("default toml parses");
         assert_eq!(parsed, Config::default());
         parsed.validate().expect("default config is valid");
@@ -380,59 +861,87 @@ mod tests {
         let err = toml::from_str::<Config>("nonsense_key = 1").unwrap_err();
         assert!(err.to_string().contains("nonsense_key"));
         // also inside a section
-        assert!(toml::from_str::<Config>("[filter]\nnonsense_key = 1").is_err());
+        assert!(toml::from_str::<Config>("[java]\nnonsense_key = 1").is_err());
+        // options of the upstream project that were renamed here
+        assert!(toml::from_str::<Config>("[filter]\nhit_count = 1").is_err());
     }
 
     #[test]
     fn partial_config_falls_back_to_defaults() {
-        let cfg: Config =
-            toml::from_str("[filter]\nhit_count = 0\n\n[metrics]\nenabled = true").unwrap();
-        assert_eq!(cfg.filter.hit_count, 0); // throttle disabled
+        let cfg = parse("[limits]\nsyn_per_ip = 0\n\n[metrics]\nenabled = true");
+        assert_eq!(cfg.limits.syn_per_ip, 0); // limit disabled
         assert!(cfg.metrics.enabled);
-        assert_eq!(cfg.filter.start_port, 25565); // default preserved
+        assert_eq!(cfg.java.start_port, 25565); // default preserved
         assert_eq!(cfg.xdp.mode, ConfigXdpMode::Auto); // untouched section defaulted
     }
 
     #[test]
-    fn rejects_inverted_port_range() {
-        let cfg: Config = toml::from_str("[filter]\nstart_port = 30000\nend_port = 25565").unwrap();
-        assert!(cfg.validate().is_err());
+    fn rejects_bad_port_ranges() {
+        assert!(
+            parse("[java]\nstart_port = 30000\nend_port = 25565")
+                .validate()
+                .is_err()
+        );
+        assert!(parse("[java]\nstart_port = 0").validate().is_err()); // end_port still set
+        assert!(
+            parse("[bedrock]\nstart_port = 19132\nend_port = 19100")
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]
-    fn rejects_zero_start_port() {
-        let cfg: Config = toml::from_str("[filter]\nstart_port = 0").unwrap();
+    fn rejects_config_that_protects_nothing() {
+        let cfg = parse("[java]\nstart_port = 0\nend_port = 0");
         assert!(cfg.validate().is_err());
+        // Bedrock alone is fine
+        let cfg = parse(
+            "[java]\nstart_port = 0\nend_port = 0\n[bedrock]\nstart_port = 19132\nend_port = 19132",
+        );
+        cfg.validate().unwrap();
     }
 
     #[test]
-    fn rejects_zero_reset_window() {
-        let cfg: Config = toml::from_str("[filter]\nhit_count_reset_secs = 0").unwrap();
+    fn rejects_overlapping_ranges_of_one_protocol() {
+        let cfg = parse("[tcp_guard]\nstart_port = 25000\nend_port = 26000");
         assert!(cfg.validate().is_err());
+        let cfg = parse(
+            "[bedrock]\nstart_port = 19132\nend_port = 19140\n\
+             [nethernet]\nice_start_port = 19140\nice_end_port = 19149",
+        );
+        assert!(cfg.validate().is_err());
+        // the same number on TCP and UDP is no conflict
+        let cfg = parse(
+            "[tcp_guard]\nstart_port = 19132\nend_port = 19132\n\
+             [bedrock]\nstart_port = 19132\nend_port = 19132",
+        );
+        cfg.validate().unwrap();
     }
 
     #[test]
-    fn rejects_oversized_reset_window() {
-        let cfg: Config = toml::from_str("[filter]\nhit_count_reset_secs = 86401").unwrap();
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn rejects_zero_idle_timeout() {
-        let cfg: Config = toml::from_str("[filter]\nplayer_idle_timeout_secs = 0").unwrap();
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn rejects_oversized_idle_timeout() {
-        let cfg: Config = toml::from_str("[filter]\nplayer_idle_timeout_secs = 86401").unwrap();
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_xdp_mode() {
-        let err = toml::from_str::<Config>("[xdp]\nmode = \"hardware\"").unwrap_err();
-        assert!(err.to_string().contains("hardware"));
+    fn rejects_bad_limits() {
+        for toml in [
+            "[limits]\nwindow_secs = 0",
+            "[limits]\nwindow_secs = 86401",
+            "[limits]\ntcp_idle_secs = 1",
+            "[limits]\nudp_idle_secs = 86401",
+            "[attack]\nretry_table_slots = 1000000",
+            "[attack]\nretry_table_slots = 512",
+            "[attack]\nretry_min_ms = 10",
+            "[attack]\nretry_max_ms = 500",
+            "[attack]\nchallenge_hold_secs = 0",
+            "[attack]\ngood_ttl_hours = 0",
+            "[java]\nprotocol_min = 800\nprotocol_max = 700",
+            "[java]\nprotocol_min = -1",
+            "[bedrock]\nraknet_protocol_min = 12",
+            "[bedrock]\nopen_request_min_size = 1500",
+            "[tcp_guard]\nstart_port = 443\nend_port = 443\nallow_tls = false\nallow_http = false",
+            "[xdp]\nadopt_secs = 3601",
+            "[xdp]\nstate_dir = \"\"",
+            "[metrics]\npoll_secs = 0",
+        ] {
+            assert!(parse(toml).validate().is_err(), "must be rejected: {toml}");
+        }
     }
 
     #[test]
@@ -440,22 +949,59 @@ mod tests {
         for option in [
             "max_pending_connections",
             "max_player_connections",
-            "max_throttled_ips",
+            "max_pending_udp_sessions",
+            "max_udp_sessions",
+            "max_tracked_ips",
         ] {
-            let cfg: Config = toml::from_str(&format!("[xdp]\n{option} = 0")).unwrap();
+            let cfg = parse(&format!("[xdp]\n{option} = 0"));
             assert!(cfg.validate().is_err(), "{option} = 0 must be rejected");
         }
     }
 
     #[test]
-    fn rejects_zero_poll_interval() {
-        let cfg: Config = toml::from_str("[metrics]\npoll_secs = 0").unwrap();
-        assert!(cfg.validate().is_err());
+    fn rejects_unknown_enum_values() {
+        let err = toml::from_str::<Config>("[xdp]\nmode = \"hardware\"").unwrap_err();
+        assert!(err.to_string().contains("hardware"));
+        assert!(toml::from_str::<Config>("[xdp]\nadopt = \"all\"").is_err());
+        assert!(toml::from_str::<Config>("[attack]\nchallenge = \"on\"").is_err());
+        let err = toml::from_str::<Config>("[logging]\nlevel = \"verbose\"").unwrap_err();
+        assert!(err.to_string().contains("verbose"));
     }
 
     #[test]
-    fn rejects_unknown_log_level() {
-        let err = toml::from_str::<Config>("[logging]\nlevel = \"verbose\"").unwrap_err();
-        assert!(err.to_string().contains("verbose"));
+    fn parses_networks() {
+        let net = Ipv4Net::parse("203.0.113.7").unwrap();
+        assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(203, 0, 113, 7), 32));
+        // host bits are cleared
+        let net = Ipv4Net::parse("198.51.100.77/24").unwrap();
+        assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(198, 51, 100, 0), 24));
+        let net = Ipv4Net::parse(" 10.1.2.3/8 ").unwrap();
+        assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(10, 0, 0, 0), 8));
+        let net = Ipv4Net::parse("1.2.3.4/0").unwrap();
+        assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(0, 0, 0, 0), 0));
+
+        for bad in ["", "1.2.3", "1.2.3.4/33", "1.2.3.4/", "example.com", "::1", "1.2.3.4/-1"] {
+            assert!(Ipv4Net::parse(bad).is_err(), "must be rejected: {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_lists_and_hosts() {
+        assert!(parse("[lists]\nallow = [\"nonsense\"]").validate().is_err());
+        assert!(parse("[lists]\ndeny = [\"1.2.3.4/40\"]").validate().is_err());
+        parse("[lists]\nallow = [\"10.0.0.0/8\"]\ndeny = [\"203.0.113.7\"]")
+            .validate()
+            .unwrap();
+
+        parse("[java]\nhosts = [\"mc.example.com\", \"Play.Example.COM.\", \"203.0.113.7\"]")
+            .validate()
+            .unwrap();
+        assert!(parse("[java]\nhosts = [\"\"]").validate().is_err());
+        let too_long = "a".repeat(65);
+        assert!(
+            parse(&format!("[java]\nhosts = [\"{too_long}\"]"))
+                .validate()
+                .is_err()
+        );
     }
 }
