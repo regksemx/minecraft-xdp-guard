@@ -165,13 +165,16 @@ struct
     __type(value, __u8);
 } allow_v4 SEC(".maps");
 
+// the deny list can also be changed while the filter runs (`xdp-loader
+// deny`). The value says how long an entry is valid: DENY_CONFIG and
+// DENY_RUNTIME never expire, anything else is the ktime the ban ends
 struct
 {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __uint(max_entries, 65536);
     __uint(map_flags, BPF_F_NO_PREALLOC);
     __type(key, struct lpm_v4_key);
-    __type(value, __u8);
+    __type(value, __u64);
 } deny_v4 SEC(".maps");
 
 // hashes of the host names players may connect with (see hash_host)
@@ -271,10 +274,16 @@ static __always_inline __u32 check_lists(const struct packet *p)
         return LIST_UNLISTED;
     }
     const struct lpm_v4_key key = {.prefixlen = 32, .addr = p->flow.src_ip};
-    if (HAS_DENY && bpf_map_lookup_elem(&deny_v4, &key))
+    if (HAS_DENY)
     {
-        count_stat(p->stats, STAT_DENYLIST, 1);
-        return LIST_DENIED;
+        // an expired ban is ignored here and removed by the next
+        // `xdp-loader deny` call or restart
+        const __u64 *until = bpf_map_lookup_elem(&deny_v4, &key);
+        if (until && (*until <= DENY_RUNTIME || p->now < *until))
+        {
+            count_stat(p->stats, STAT_DENYLIST, 1);
+            return LIST_DENIED;
+        }
     }
     if (HAS_ALLOW && bpf_map_lookup_elem(&allow_v4, &key))
     {

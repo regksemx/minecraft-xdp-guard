@@ -134,7 +134,7 @@ def main():
     loader.stop()
     client.expect(f"echo {java}", "ok")                                # no filter in between
     output = loader.start(**DEFAULTS)
-    check("pinned maps are reused", output.count("Reusing pinned map") == 3, output)
+    check("pinned maps are reused", output.count("Reusing pinned map") == 4, output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"echo {java_split}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
@@ -146,7 +146,9 @@ def main():
     # ---- phase 3: state lost, existing connections are adopted -----------
     loader.stop()
     output = loader.start(reset=True, **{**DEFAULTS, "adopt": "socket"})
-    check("state was reset", output.count("Removed pinned map") == 3 and "Reusing" not in output, output)
+    # connections and known ips are forgotten, the deny list is not
+    check("state was reset", output.count("Removed pinned map") == 3 and output.count("Reusing pinned map") == 1,
+          output)
     client.expect(f"echo {java}", "ok")
     client.expect(f"rak_data {raknet}", "ok")
     client.expect(f"ice_dtls {ice}", "ok")
@@ -200,9 +202,51 @@ def main():
     check("metrics: allow list", loader.metric("minecraft_allowlist_passed") > 5)
     check("metrics: nothing dropped", loader.metric("minecraft_dropped_packets") == 0)
 
+    # ---- phase 6: bans while the filter runs -----------------------------
+    loader.stop()
+    loader.start(reset=True, **DEFAULTS)
+    java = client.expect("java_login Steve mc.e2e.test", "ok")
+    client.expect("rak_ping", "ok")
+    check("deny list starts empty", loader.deny("list").strip() == "")
+
+    output = loader.deny("add", "--ttl", "3", "10.99.0.2")
+    check("the ban cut the open connection", "banned 1 (1 open connections cut)" in output, output)
+    client.expect(f"echo {java}", "timeout")
+    client.expect("rak_ping", "timeout")
+    client.expect("tcp_raw 8080 00", "reply")                          # only the protected ports
+    output = loader.deny("list")
+    check("the ban is listed with its remaining time", "10.99.0.2/32" in output and "s left" in output, output)
+    time.sleep(2.5)
+    client.expect("rak_ping", "ok")                                    # the ban expired
+    check("expired bans are removed", loader.deny("list").strip() == "")
+
+    # a ban without an end survives restarts, with and without --reset-state
+    loader.deny("add", "10.99.0.0/24", "203.0.113.7")
+    client.expect("rak_ping", "timeout")
+    loader.stop()
+    output = loader.start(**DEFAULTS)
+    check("bans are kept across a restart", "2 bans kept" in output, output)
+    client.expect("rak_ping", "timeout")
+    loader.stop()
+    loader.start(reset=True, **DEFAULTS)
+    client.expect("rak_ping", "timeout")
+    check("del reports what it removed", "removed 1" in loader.deny("del", "10.99.0.0/24"))
+    client.expect("rak_ping", "ok")
+    check("the other ban is still there", loader.deny("list").split() == ["203.0.113.7/32", "until", "removed"])
+
+    # bans from the config file follow the config file
+    loader.stop()
+    loader.start(**{**DEFAULTS, "deny": ["10.99.0.2"]})
+    client.expect("rak_ping", "timeout")
+    check("flush leaves the config entries alone", "removed 1" in loader.deny("flush"))
+    check("config entries are listed", loader.deny("list").split() == ["10.99.0.2/32", "config", "file"])
+    loader.stop()
+    loader.start(**DEFAULTS)
+    client.expect("rak_ping", "ok")
+
     loader.stop()
     check("state is kept after exit", sorted(os.listdir(os.path.join(STATE_DIR, "v1"))) ==
-          ["ip_table", "verified_tcp", "verified_udp"])
+          ["deny_v4", "ip_table", "verified_tcp", "verified_udp"])
 
     client.close()
     server.kill()

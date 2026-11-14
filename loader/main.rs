@@ -1,4 +1,5 @@
 mod config;
+mod deny;
 mod ebpf;
 mod hosts;
 mod logging;
@@ -16,6 +17,8 @@ use shutdown::Shutdown;
 
 const USAGE: &str = "\
 Usage: xdp-loader [OPTIONS] <INTERFACE>
+       xdp-loader deny <COMMAND>    Change the deny list of the running
+                                    filter, see `xdp-loader deny --help`
 
 Arguments:
   <INTERFACE>  Network interface to attach to
@@ -24,7 +27,7 @@ Options:
   -c, --config <FILE>  Path to the TOML configuration file, created with
                        defaults if missing [default: config.toml]
       --reset-state    Forget verified connections and known IPs kept from
-                       an earlier run before starting
+                       an earlier run before starting (bans stay)
       --license        Print license information
   -h, --help           Print help
   -V, --version        Print version";
@@ -88,6 +91,17 @@ fn parse_args() -> Args {
 }
 
 fn main() {
+    // `xdp-loader deny ...` talks to the maps of the loader that is already
+    // running, it never loads anything itself
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|arg| arg == "deny") {
+        if let Err(e) = deny::run(&argv[1..]) {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let args = parse_args();
 
     if args.license {
@@ -139,7 +153,7 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
         .context("interface is required unless --license is specified")?;
 
     if args.reset_state {
-        ebpf::remove_state(config);
+        ebpf::remove_state(config, false);
     }
 
     // keep the handle alive until the end of this function: dropping it
@@ -150,7 +164,7 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
     shutdown.wait();
 
     if !config.xdp.keep_state {
-        ebpf::remove_state(config);
+        ebpf::remove_state(config, true);
     }
 
     if let Some(handle) = stats_thread {

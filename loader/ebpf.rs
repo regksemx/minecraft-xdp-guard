@@ -8,6 +8,7 @@ use aya::{Ebpf, EbpfLoader, include_bytes_aligned};
 use log::{info, warn};
 
 use crate::config::{AdoptMode, ChallengeMode, Config, ConfigXdpMode, Ipv4Net};
+use crate::deny;
 use crate::hosts;
 
 const NSEC_PER_SEC: u64 = 1_000_000_000;
@@ -31,10 +32,18 @@ struct StateMap {
     max_entries: u32,
 }
 
-/// The maps that make up the state worth keeping across restarts: verified
-/// flows and what is known about source ips. Sizes mirror xdp/common.h.
-fn state_maps(config: &Config) -> [StateMap; 3] {
+/// The maps that are pinned while the loader runs: verified flows, what is
+/// known about source ips and the deny list. Pinning lets them outlive a
+/// restart and lets `xdp-loader deny` reach them. Sizes mirror xdp/common.h.
+fn state_maps(config: &Config) -> [StateMap; 4] {
     [
+        // the capacity of the deny list is fixed in xdp/minecraft_filter.c
+        StateMap {
+            name: deny::MAP_NAME,
+            key_size: 8,
+            value_size: 8,
+            max_entries: 65536,
+        },
         StateMap {
             name: "verified_tcp",
             key_size: 12,
@@ -56,14 +65,18 @@ fn state_maps(config: &Config) -> [StateMap; 3] {
     ]
 }
 
-fn state_dir(config: &Config) -> PathBuf {
+pub fn state_dir(config: &Config) -> PathBuf {
     Path::new(&config.xdp.state_dir).join(STATE_LAYOUT)
 }
 
-/// Removes every pinned state map, so the next load starts from scratch.
-pub fn remove_state(config: &Config) {
+/// Removes the pinned state maps, so the next load starts from scratch.
+/// The deny list only goes along when `bans` is set.
+pub fn remove_state(config: &Config, bans: bool) {
     let dir = state_dir(config);
     for map in state_maps(config) {
+        if map.name == deny::MAP_NAME && !bans {
+            continue;
+        }
         let path = dir.join(map.name);
         match std::fs::remove_file(&path) {
             Ok(()) => info!("Removed pinned map {}", path.display()),
@@ -123,7 +136,7 @@ fn per_cpu(total: u32, cpus: u32) -> u32 {
 
 /// Current CLOCK_MONOTONIC in nanoseconds, the clock of
 /// `bpf_ktime_get_coarse_ns()`.
-fn monotonic_ns() -> Result<u64> {
+pub fn monotonic_ns() -> Result<u64> {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -192,7 +205,9 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Ebpf> {
     let prometheus = config.metrics.enabled as u8;
     let ipv6_protect = config.xdp.drop_ipv6 as u8;
     let has_allow = !allow.is_empty() as u8;
-    let has_deny = !deny.is_empty() as u8;
+    // always on: bans can be added while the filter runs. Looking up an
+    // empty list costs next to nothing
+    let has_deny: u8 = 1;
     let limit_window_ns = limits.window_secs * NSEC_PER_SEC;
 
     let adopt_mode: u8 = match config.xdp.adopt {
@@ -254,18 +269,16 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Ebpf> {
     let good_after_ns = attack.good_after_secs * NSEC_PER_SEC;
     let good_ttl_ns = attack.good_ttl_hours * 3600 * NSEC_PER_SEC;
 
-    let pins = if config.xdp.keep_state {
-        match prepare_state(config) {
-            Ok(pins) => pins,
-            Err(e) => {
-                warn!("Not keeping state across restarts: {e:#}");
-                Vec::new()
-            }
+    if !config.xdp.keep_state {
+        // nothing of an earlier run may be picked up
+        remove_state(config, true);
+    }
+    let pins = match prepare_state(config) {
+        Ok(pins) => pins,
+        Err(e) => {
+            warn!("Running without pinned maps (no state across restarts, no `xdp-loader deny`): {e:#}");
+            Vec::new()
         }
-    } else {
-        // leftovers of an earlier run with keep_state would only waste memory
-        remove_state(config);
-        Vec::new()
     };
 
     let mut loader = EbpfLoader::new();
@@ -334,7 +347,13 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Ebpf> {
     // the lists have to be in place before the first packet is filtered
     fill_hosts(&mut ebpf, &allowed_hosts)?;
     fill_list(&mut ebpf, "allow_v4", &allow)?;
-    fill_list(&mut ebpf, "deny_v4", &deny)?;
+    let map = ebpf
+        .map_mut(deny::MAP_NAME)
+        .context("map 'deny_v4' not found")?;
+    let kept_bans = deny::sync_config(&mut LpmTrie::try_from(map)?, &deny)?;
+    if kept_bans > 0 {
+        info!("Deny list: {kept_bans} bans kept from before the restart");
+    }
 
     let program: &mut Xdp = ebpf
         .program_mut("minecraft_filter")

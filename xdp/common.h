@@ -217,6 +217,11 @@ struct cpu_state
 };
 _Static_assert(sizeof(struct cpu_state) == 40, "cpu_state size mismatch!");
 
+// values of deny_v4 that mark a ban without an end; every other value is
+// the ktime at which the ban expires
+#define DENY_CONFIG 0  // listed in the config file, replaced on every start
+#define DENY_RUNTIME 1 // added while running, kept until it is removed
+
 // IPv4 key of the allow/deny LPM tries (prefixlen first, as the kernel wants)
 struct lpm_v4_key
 {

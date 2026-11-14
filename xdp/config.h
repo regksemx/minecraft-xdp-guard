@@ -29,7 +29,7 @@
 volatile const __u8 PROMETHEUS = 0;        // collect statistics in stats_map
 volatile const __u8 IPV6_PROTECT = 0;      // drop IPv6 traffic aimed at any protected port
 volatile const __u8 HAS_ALLOW = 0;         // allow_v4 has entries
-volatile const __u8 HAS_DENY = 0;          // deny_v4 has entries
+volatile const __u8 HAS_DENY = 0;          // consult deny_v4 (it can be filled while running)
 volatile const __u64 LIMIT_WINDOW_NS = 0;  // length of the per ip rate limit window
 
 /* --- flows that existed before the filter was attached ---------------- */

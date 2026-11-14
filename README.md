@@ -36,7 +36,8 @@ protected ports can be dropped as a whole (`[xdp] drop_ipv6`).
   new sessions per second. IPs that played for a few minutes are exempt, so
   regular players keep getting in while bots fight over the budget.
 - **Packet rate limit** per verified connection.
-- **Allow and deny lists** (IPv4 networks).
+- **Allow and deny lists** (IPv4 networks). Bans can be added while the
+  filter runs, with a lifetime, and cut the banned address off immediately.
 - **Restart without disconnects**: verified connections and known IPs live in
   pinned maps and survive a restart of the loader; connections that existed
   before the first start are adopted.
@@ -158,13 +159,27 @@ A port range with `start_port = 0` switches that protection off.
 **`[lists]`** — `allow` and `deny`: IPv4 addresses or networks that are never
 inspected, or always dropped, on the protected ports.
 
+Bans do not need a restart:
+
+```bash
+xdp-loader deny -c /etc/minecraft-xdp/config.toml add --ttl 3600 203.0.113.7   # for an hour
+xdp-loader deny -c /etc/minecraft-xdp/config.toml add 198.51.100.0/24          # until removed
+xdp-loader deny -c /etc/minecraft-xdp/config.toml list
+xdp-loader deny -c /etc/minecraft-xdp/config.toml del 198.51.100.0/24
+```
+
+A ban takes effect with the next packet, also cuts the connections the
+address has open, and survives a restart of the loader. `add -` reads
+addresses from stdin, which makes it easy to feed from an anti-cheat or a
+log watcher.
+
 **`[xdp]`** — attachment, state and table sizes
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `mode` | `"auto"` | `"auto"` (native if the NIC supports it, else generic), `"driver"`, `"skb"`. |
 | `drop_ipv6` | false | Drop IPv6 packets to the protected ports. |
-| `keep_state` | true | Keep verified connections and known IPs across restarts. |
+| `keep_state` | true | Keep verified connections, known IPs and bans across restarts. |
 | `state_dir` | `/sys/fs/bpf/minecraft-xdp` | Where the state maps are pinned. |
 | `adopt` | `"socket"` | Connections from before the start: `"socket"` (TCP only if this host's kernel has the connection), `"blind"`, `"off"`. |
 | `adopt_secs` | 30 | For how long after the start they are adopted. |

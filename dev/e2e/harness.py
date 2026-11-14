@@ -70,6 +70,14 @@ class Loader:
         with open(self.log.name) as f:
             return f.read()
 
+    def deny(self, *args):
+        """Runs `xdp-loader deny ...` against the running loader; returns its output."""
+        argv = [self.binary, "deny", "-c", os.path.join(self.workdir, "config.toml"), *args]
+        process = in_ns(SRV, argv, cwd=self.workdir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        output = process.communicate()[0]
+        check("deny " + " ".join(args), process.returncode == 0, output)
+        return output
+
     def stop(self):
         self.process.terminate()
         check("loader exits cleanly", self.process.wait(timeout=10) == 0)

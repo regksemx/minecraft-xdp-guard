@@ -138,6 +138,7 @@ good_ttl_hours = 72
 # IPv4 addresses or networks ("203.0.113.7", "198.51.100.0/24").
 # allow: never inspected or limited on the protected ports (monitoring,
 #        your own proxies). deny: always dropped on the protected ports.
+# Bans can also be added while the filter runs, see `xdp-loader deny --help`.
 allow = []
 deny = []
 
@@ -156,10 +157,11 @@ mode = "auto"
 # dropped then, instead of bypassing the filter.
 drop_ipv6 = false
 
-# Keep the tables of verified connections and known IPs pinned in state_dir,
-# so that restarting the loader does not disconnect anyone. They stay there
-# (and keep their memory) after the loader exits; run the loader with
-# --reset-state to start from scratch.
+# The tables of verified connections, known IPs and bans are pinned in
+# state_dir while the loader runs. With keep_state they stay there (and keep
+# their memory) after it exits, so that restarting the loader does not
+# disconnect anyone; run the loader with --reset-state to forget connections
+# and known IPs. Without keep_state everything is removed on exit.
 keep_state = true
 state_dir = "/sys/fs/bpf/minecraft-xdp"
 
@@ -475,6 +477,24 @@ impl Ipv4Net {
             addr: Ipv4Addr::from(u32::from(addr) & mask),
             prefix_len,
         })
+    }
+}
+
+impl Ipv4Net {
+    /// Whether `addr` lies inside this network.
+    pub fn contains(&self, addr: Ipv4Addr) -> bool {
+        let mask = if self.prefix_len == 0 {
+            0
+        } else {
+            u32::MAX << (32 - self.prefix_len)
+        };
+        u32::from(addr) & mask == u32::from(self.addr)
+    }
+}
+
+impl fmt::Display for Ipv4Net {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.addr, self.prefix_len)
     }
 }
 
@@ -985,6 +1005,15 @@ mod tests {
         for bad in ["", "1.2.3", "1.2.3.4/33", "1.2.3.4/", "example.com", "::1", "1.2.3.4/-1"] {
             assert!(Ipv4Net::parse(bad).is_err(), "must be rejected: {bad}");
         }
+
+        let net = Ipv4Net::parse("198.51.100.0/24").unwrap();
+        assert_eq!(net.to_string(), "198.51.100.0/24");
+        assert!(net.contains(Ipv4Addr::new(198, 51, 100, 255)));
+        assert!(!net.contains(Ipv4Addr::new(198, 51, 101, 0)));
+        assert!(Ipv4Net::parse("0.0.0.0/0").unwrap().contains(Ipv4Addr::new(8, 8, 8, 8)));
+        let host = Ipv4Net::parse("203.0.113.7").unwrap();
+        assert!(host.contains(Ipv4Addr::new(203, 0, 113, 7)));
+        assert!(!host.contains(Ipv4Addr::new(203, 0, 113, 8)));
     }
 
     #[test]

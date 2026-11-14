@@ -1152,8 +1152,9 @@ static void test_lists(void)
 {
     LOAD_OR_RETURN(with_lists);
     const __u8 one = 1;
+    const __u64 forever = 0;
     struct lpm_key key = {24, htonl(0xCB007100u)}; // 203.0.113.0/24
-    CHECK(bpf_map__update_elem(skel->maps.deny_v4, &key, sizeof(key), &one, sizeof(one), BPF_ANY) == 0);
+    CHECK(bpf_map__update_elem(skel->maps.deny_v4, &key, sizeof(key), &forever, sizeof(forever), BPF_ANY) == 0);
     key = (struct lpm_key){32, htonl(0xC0000207u)}; // 192.0.2.7
     CHECK(bpf_map__update_elem(skel->maps.allow_v4, &key, sizeof(key), &one, sizeof(one), BPF_ANY) == 0);
     const struct bytes ping = raknet_ping();
@@ -1173,6 +1174,23 @@ static void test_lists(void)
 
     // everyone else is filtered as usual
     java_login(CLIENT_IP, 5000, 1000, 1);
+
+    // bans added while running: without an end, with one, and expired
+    const __u64 runtime = 1;
+    const __u64 soon = monotonic_ns() + 700 * MS;
+    const __u64 past = monotonic_ns() - 1 * SEC;
+    key = (struct lpm_key){32, htonl(CLIENT_IP + 1)};
+    CHECK(bpf_map__update_elem(skel->maps.deny_v4, &key, sizeof(key), &runtime, sizeof(runtime), BPF_ANY) == 0);
+    key = (struct lpm_key){32, htonl(CLIENT_IP + 2)};
+    CHECK(bpf_map__update_elem(skel->maps.deny_v4, &key, sizeof(key), &soon, sizeof(soon), BPF_ANY) == 0);
+    key = (struct lpm_key){32, htonl(CLIENT_IP + 3)};
+    CHECK(bpf_map__update_elem(skel->maps.deny_v4, &key, sizeof(key), &past, sizeof(past), BPF_ANY) == 0);
+    DROPS(tcp_to(CLIENT_IP + 1, 5000, JAVA_PORT, 1, TCP_SYN, NULL, 0));
+    DROPS(tcp_to(CLIENT_IP + 2, 5000, JAVA_PORT, 1, TCP_SYN, NULL, 0));
+    PASSES(tcp_to(CLIENT_IP + 3, 5000, JAVA_PORT, 1, TCP_SYN, NULL, 0));
+    sleep_ms(900);
+    DROPS(tcp_to(CLIENT_IP + 1, 5001, JAVA_PORT, 1, TCP_SYN, NULL, 0));
+    PASSES(tcp_to(CLIENT_IP + 2, 5001, JAVA_PORT, 1, TCP_SYN, NULL, 0)); // the ban is over
 }
 
 static void adopt_blind(struct minecraft_filter *s)
