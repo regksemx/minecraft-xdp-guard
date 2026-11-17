@@ -85,13 +85,23 @@ _Static_assert(LOGIN_SIGNATURE_MAX <= LOGIN_SIGNATURE_SKIP_MASK, "signature skip
 #define HOST_HASH_MAX 64 // longest host name the filter can match
 #define FNV64_OFFSET 0xCBF29CE484222325ULL
 #define FNV64_PRIME 0x100000001B3ULL
+// FNV-1a state after "*.", where the hash of a wildcard form continues
+#define FNV64_WILD ((((FNV64_OFFSET ^ '*') * FNV64_PRIME) ^ '.') * FNV64_PRIME)
 
-// hashes the host name at `host`; returns 0 if it is out of bounds or longer
-// than HOST_HASH_MAX, 1 on success
-static __always_inline __u8 hash_host(const __u8 *host, const __u32 host_len, const __u8 *payload_end, const void *data_end, __u64 *hash_out)
+/*
+ * With `wild` set the host is hashed in its wildcard form: "*." followed by
+ * everything after the first dot, so "maestro.example.com" hashes like the
+ * configured name "*.example.com". Exactly one label is replaced: neither
+ * the apex ("example.com") nor deeper names ("a.b.example.com") match it.
+ */
+// hashes the host name at `host`; returns 0 if it is out of bounds, longer
+// than HOST_HASH_MAX or, in wildcard form, has no dot; 1 on success
+static __always_inline __u8 hash_host(const __u8 *host, const __u32 host_len, const __u8 *payload_end, const void *data_end, __u64 *hash_out, const __u8 wild)
 {
     __u64 hash = FNV64_OFFSET;
     __u8 pending_dot = 0;
+    // wildcard form: nothing is hashed up to and including the first dot
+    __u8 skipping = wild;
 
     for (__u32 i = 0; i <= HOST_HASH_MAX; i++)
     {
@@ -109,6 +119,16 @@ static __always_inline __u8 hash_host(const __u8 *host, const __u32 host_len, co
         if (i == HOST_HASH_MAX)
         {
             return 0; // more than HOST_HASH_MAX characters
+        }
+        if (skipping)
+        {
+            if (c == '.')
+            {
+                // the first label and its dot become "*."
+                hash = FNV64_WILD;
+                skipping = 0;
+            }
+            continue;
         }
         if (c == '.')
         {
@@ -133,6 +153,10 @@ static __always_inline __u8 hash_host(const __u8 *host, const __u32 host_len, co
         hash = (hash ^ c) * FNV64_PRIME;
     }
 
+    if (skipping)
+    {
+        return 0; // no dot: nothing a wildcard could match
+    }
     *hash_out = hash;
     return 1;
 }

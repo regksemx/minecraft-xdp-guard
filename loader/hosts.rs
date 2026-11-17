@@ -15,6 +15,11 @@ const FNV64_PRIME: u64 = 0x0000_0100_0000_01B3;
 /// Brings a configured host name into the form the eBPF program hashes:
 /// ASCII lowercase, without surrounding whitespace and without one trailing
 /// dot.
+///
+/// `*.example.com` is a wildcard: it matches any name with exactly one more
+/// label in front (`mc.example.com`, not `example.com` or `a.b.example.com`).
+/// The filter hashes a handshake's name in that form (`hash_host()` with
+/// `wild`), so the wildcard entry is hashed like any other name.
 pub fn normalize(host: &str) -> Result<String> {
     let host = host.trim().to_ascii_lowercase();
     let host = host.strip_suffix('.').unwrap_or(&host);
@@ -27,7 +32,19 @@ pub fn normalize(host: &str) -> Result<String> {
     if host.bytes().any(|b| b == 0) {
         bail!("host name contains a NUL byte");
     }
+    let rest = host.strip_prefix("*.").unwrap_or(host);
+    if rest.contains('*') {
+        bail!("'*' is only allowed as the whole first label (\"*.example.com\")");
+    }
+    if rest.is_empty() || rest.starts_with('.') {
+        bail!("wildcard without a domain");
+    }
     Ok(host.to_owned())
+}
+
+/// Whether a normalized name is a wildcard entry.
+pub fn is_wildcard(normalized: &str) -> bool {
+    normalized.starts_with("*.")
 }
 
 /// FNV-1a (64 bit) of a normalized host name, the key of `allowed_hosts`.
@@ -70,5 +87,27 @@ mod tests {
         assert!(normalize(&"a".repeat(MAX_HOST_LEN + 1)).is_err());
         assert!(normalize(&"a".repeat(MAX_HOST_LEN)).is_ok());
         assert!(normalize("mc.example.com\0FML").is_err());
+    }
+
+    #[test]
+    fn accepts_wildcards_only_as_first_label() {
+        assert_eq!(normalize("*.Example.COM.").unwrap(), "*.example.com");
+        assert!(is_wildcard("*.example.com"));
+        assert!(!is_wildcard("mc.example.com"));
+        assert!(normalize("*").is_err());
+        assert!(normalize("*.").is_err());
+        assert!(normalize("*..com").is_err());
+        assert!(normalize("mc.*.example.com").is_err());
+        assert!(normalize("*mc.example.com").is_err());
+        assert!(normalize("*.*.example.com").is_err());
+    }
+
+    #[test]
+    fn wildcard_hash_continues_after_star_dot() {
+        // FNV64_WILD in xdp/protocol.h is the state after "*."; the filter
+        // continues from it with the labels after the first dot
+        let wild = "*.".bytes().fold(FNV64_OFFSET, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV64_PRIME));
+        let rest = "example.com".bytes().fold(wild, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV64_PRIME));
+        assert_eq!(hash("*.example.com"), rest);
     }
 }

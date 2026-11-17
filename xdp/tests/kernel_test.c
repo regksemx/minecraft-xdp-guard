@@ -752,6 +752,35 @@ static void test_java_host_filter(void)
     DROPS(tcp_data(CLIENT_IP, 5010, JAVA_PORT, 1001, &login));
 }
 
+static void with_host_wildcards(struct minecraft_filter *s)
+{
+    s->rodata->HOST_FILTER = 1;
+    s->rodata->HOST_WILDCARDS = 1;
+}
+
+static void test_java_host_wildcard(void)
+{
+    LOAD_OR_RETURN(with_host_wildcards);
+    const __u8 one = 1;
+    __u64 key = fnv1a64("*.example.su");
+    CHECK(bpf_map__update_elem(skel->maps.allowed_hosts, &key, sizeof(key), &one, sizeof(one), BPF_ANY) == 0);
+    key = fnv1a64("mc.example.net");
+    CHECK(bpf_map__update_elem(skel->maps.allowed_hosts, &key, sizeof(key), &one, sizeof(one), BPF_ANY) == 0);
+
+    java_host(5000, "maestro.example.su", 18, INTENT_LOGIN, XDP_PASS);
+    java_host(5001, "MC.Example.SU", 13, INTENT_STATUS, XDP_PASS);
+    java_host(5002, "go.example.su.", 14, INTENT_LOGIN, XDP_PASS);           // SRV target with root dot
+    java_host(5003, "yt.example.su\0FML3\0", 19, INTENT_LOGIN, XDP_PASS);   // Forge marker
+    java_host(5004, "mc.example.net", 14, INTENT_LOGIN, XDP_PASS);          // exact entries still work
+
+    java_host(5010, "example.su", 10, INTENT_LOGIN, XDP_DROP);              // the apex is not covered
+    java_host(5011, "a.b.example.su", 14, INTENT_LOGIN, XDP_DROP);          // one label only
+    java_host(5012, "play.example.net", 16, INTENT_LOGIN, XDP_DROP);
+    java_host(5013, "203.0.113.1", 12, INTENT_STATUS, XDP_DROP);           // a status flood aimed at the bare address
+    java_host(5014, "localhost", 9, INTENT_LOGIN, XDP_DROP);
+    CHECK(stat(STAT_JAVA_BAD_HOST) == 5);
+}
+
 static void with_protocol_range(struct minecraft_filter *s)
 {
     s->rodata->JAVA_PROTO_MIN = 754; // 1.16.5
@@ -2092,6 +2121,7 @@ int main(int argc, char **argv)
     test_java_status();
     test_java_rejects_garbage();
     test_java_host_filter();
+    test_java_host_wildcard();
     test_java_protocol_range();
     test_per_ip_limits();
     test_challenge();

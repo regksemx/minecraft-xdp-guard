@@ -331,12 +331,14 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
 
     let allow = config.lists.allow_nets().context("[lists] allow")?;
     let deny = config.lists.deny_nets().context("[lists] deny")?;
-    let allowed_hosts = java
+    let normalized_hosts = java
         .hosts
         .iter()
-        .map(|host| hosts::normalize(host).map(|host| hosts::hash(&host)))
-        .collect::<Result<Vec<u64>>>()
+        .map(|host| hosts::normalize(host))
+        .collect::<Result<Vec<String>>>()
         .context("[java] hosts")?;
+    let host_wildcards = normalized_hosts.iter().any(|host| hosts::is_wildcard(host)) as u8;
+    let allowed_hosts = normalized_hosts.iter().map(|host| hosts::hash(host)).collect::<Vec<u64>>();
 
     let prometheus = config.metrics.enabled as u8;
     // IPV6_PASS / IPV6_DROP / IPV6_INSPECT in xdp/common.h
@@ -456,6 +458,7 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
         .override_global("JAVA_END_PORT", &java_end_port, true)
         .override_global("ONLINE_NAMES", &online_names, true)
         .override_global("HOST_FILTER", &host_filter, true)
+        .override_global("HOST_WILDCARDS", &host_wildcards, true)
         .override_global("JAVA_PROTO_MIN", &java_proto_min, true)
         .override_global("JAVA_PROTO_MAX", &java_proto_max, true)
         .override_global("STATUS_HITS", &status_hits, true)

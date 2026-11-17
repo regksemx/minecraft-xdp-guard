@@ -637,7 +637,7 @@ static __always_inline __u8 verify_flow(const struct packet *p, void *map, const
  * a packet pointer, only the context and scalars can cross that boundary.
  * The caller has already checked that the host lies inside the payload.
  */
-__noinline __u64 handshake_host_hash(struct xdp_md *ctx, __u32 offset, __u32 host_len)
+__noinline __u64 handshake_host_hash(struct xdp_md *ctx, __u32 offset, __u32 host_len, __u32 wild)
 {
     const void *data = (const void *)(long)ctx->data;
     const void *data_end = (const void *)(long)ctx->data_end;
@@ -649,7 +649,7 @@ __noinline __u64 handshake_host_hash(struct xdp_md *ctx, __u32 offset, __u32 hos
     }
     const __u8 *host = (const __u8 *)data + offset;
     __u64 hash = 0;
-    if (!hash_host(host, host_len, data_end, data_end, &hash))
+    if (!hash_host(host, host_len, data_end, data_end, &hash, wild != 0))
     {
         return 0;
     }
@@ -907,8 +907,17 @@ static __always_inline __u32 handle_tcp(struct packet *p, const struct tcphdr *t
             // never even completes the TCP handshake
             if (HOST_FILTER)
             {
-                const __u64 host_hash = handshake_host_hash(p->ctx, (__u32)(host - (const __u8 *)p->data), host_len);
-                if (!host_hash || !bpf_map_lookup_elem(&allowed_hosts, &host_hash))
+                const __u32 host_offset = (__u32)(host - (const __u8 *)p->data);
+                const __u64 host_hash = handshake_host_hash(p->ctx, host_offset, host_len, 0);
+                __u8 host_ok = host_hash && bpf_map_lookup_elem(&allowed_hosts, &host_hash);
+                // wildcard entries ("*.example.com") only cost a second pass
+                // over the name when the exact one is not listed
+                if (!host_ok && HOST_WILDCARDS)
+                {
+                    const __u64 wild_hash = handshake_host_hash(p->ctx, host_offset, host_len, 1);
+                    host_ok = wild_hash && bpf_map_lookup_elem(&allowed_hosts, &wild_hash);
+                }
+                if (!host_ok)
                 {
                     count_stat(p->stats, STAT_JAVA_BAD_HOST, 1);
                     goto drop_connection;

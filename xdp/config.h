@@ -42,6 +42,7 @@ volatile const __u32 JAVA_START_PORT = 0;  // first TCP port of the Java range (
 volatile const __u32 JAVA_END_PORT = 0;    // last TCP port of the Java range (inclusive)
 volatile const __u8 ONLINE_NAMES = 0;      // enforce online-mode usernames (max 16 chars)
 volatile const __u8 HOST_FILTER = 0;       // handshake host must be listed in allowed_hosts
+volatile const __u8 HOST_WILDCARDS = 0;    // allowed_hosts holds "*.domain" entries, see hash_host
 volatile const __s32 JAVA_PROTO_MIN = 0;   // lowest protocol version allowed to log in, 0 = any
 volatile const __s32 JAVA_PROTO_MAX = 0;   // highest protocol version allowed to log in, 0 = any
 volatile const __u32 STATUS_HITS = 0;      // status (server list) requests per ip

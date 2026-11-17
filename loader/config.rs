@@ -31,7 +31,9 @@ online_names = true
 # of your SRV record). Handshakes for any other host are dropped, which stops
 # bots that scan or attack the bare IP address. Not case sensitive; list the
 # IP address too if players may use it. Empty = any host is accepted.
-# hosts = ["mc.example.com", "play.example.com"]
+# "*.example.com" accepts any name with one more label in front of the domain
+# (mc.example.com, go.example.com), not the domain itself and not deeper names.
+# hosts = ["mc.example.com", "play.example.com", "*.example.com"]
 hosts = []
 
 # Protocol versions allowed to log in (0 = no bound), e.g. protocol_min = 754
@@ -290,8 +292,9 @@ pub struct JavaConfig {
     pub end_port: u16,
     /// Enforce online-mode (<= 16 char) usernames. Maps to `ONLINE_NAMES`.
     pub online_names: bool,
-    /// Host names accepted in the handshake; empty = any. Fills the
-    /// `allowed_hosts` map and sets `HOST_FILTER`.
+    /// Host names accepted in the handshake; empty = any. `*.domain` is a
+    /// wildcard for one label. Fills the `allowed_hosts` map and sets
+    /// `HOST_FILTER` (and `HOST_WILDCARDS`).
     pub hosts: Vec<String>,
     /// Lowest protocol version allowed to log in, 0 = any. Maps to `JAVA_PROTO_MIN`.
     pub protocol_min: i32,

@@ -749,9 +749,44 @@ static __u64 run_hash_host(const char *host, __u32 len)
 {
     __u8 *heap = heap_copy((const __u8 *)host, len, 0);
     __u64 hash = 0;
-    const __u8 ok = hash_host(heap, len, heap + len, heap + len, &hash);
+    const __u8 ok = hash_host(heap, len, heap + len, heap + len, &hash, 0);
     free(heap);
     return ok ? hash : 0;
+}
+
+// the same in wildcard form
+static __u64 run_hash_wild(const char *host, __u32 len)
+{
+    __u8 *heap = heap_copy((const __u8 *)host, len, 0);
+    __u64 hash = 0;
+    const __u8 ok = hash_host(heap, len, heap + len, heap + len, &hash, 1);
+    free(heap);
+    return ok ? hash : 0;
+}
+
+static void test_host_wildcard(void)
+{
+    const __u64 wild = fnv1a64("*.example.com");
+    CHECK(run_hash_wild("maestro.example.com", 19) == wild);
+    CHECK(run_hash_wild("MC.Example.COM", 14) == wild);
+    CHECK(run_hash_wild("mc.example.com.", 15) == wild);               // SRV target with root dot
+    CHECK(run_hash_wild("go.example.com\0FML3\0", 20) == wild);       // Forge marker
+    CHECK(run_hash_wild(".example.com", 12) == wild);                 // empty first label
+    // only one label is replaced
+    CHECK(run_hash_wild("a.b.example.com", 15) != wild);
+    CHECK(run_hash_wild("a.b.example.com", 15) == fnv1a64("*.b.example.com"));
+    CHECK(run_hash_wild("example.com", 11) == fnv1a64("*.com"));
+    // no dot: no wildcard form
+    CHECK(run_hash_wild("localhost", 9) == 0);
+    CHECK(run_hash_wild("", 0) == 0);
+    // the exact form is untouched by the wildcard one
+    CHECK(run_hash_host("maestro.example.com", 19) == fnv1a64("maestro.example.com"));
+    // the length limit counts the whole name
+    char longest[HOST_HASH_MAX + 1];
+    memset(longest, 'a', sizeof(longest));
+    longest[1] = '.';
+    CHECK(run_hash_wild(longest, HOST_HASH_MAX) != 0);
+    CHECK(run_hash_wild(longest, HOST_HASH_MAX + 1) == 0);
 }
 
 static void test_host_hash(void)
@@ -1272,6 +1307,7 @@ int main(void)
     test_login_uuid_eras();
     test_login_rejects_length_mismatch();
     test_host_hash();
+    test_host_wildcard();
     test_handshake_reports_host();
     test_raknet_ping();
     test_raknet_open_connection();
