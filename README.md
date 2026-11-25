@@ -1,12 +1,39 @@
-# Minecraft XDP Filter using eBPF – L7 DDoS Protection
+# Minecraft XDP Filter: Java, Bedrock and Voice
 
-A high-performance XDP firewall for Minecraft servers and proxies. It drops
-malicious packets at the driver level, before the kernel network stack or the
-server spends anything on them.
+![License](https://img.shields.io/badge/license-BSD--3--Clause%20%2F%20GPL--2.0-blue)
+![Kernel](https://img.shields.io/badge/linux-5.11%2B-informational)
+![Tests](https://img.shields.io/badge/checks-1000%2B%20passing-brightgreen)
 
-This is a fork of [Outfluencer/Minecraft-XDP-eBPF](https://github.com/Outfluencer/Minecraft-XDP-eBPF)
-(Java Edition, versions 1.8 - 26.3) that adds Bedrock Edition, NetherNet and
-an attack mode built for small machines.
+An XDP / eBPF firewall for Minecraft servers and proxies. Malicious packets
+are dropped in the network driver, before the kernel, the proxy or the server
+spends anything on them. Java Edition, Bedrock Edition (RakNet and NetherNet),
+Simple Voice Chat and IPv6, with an attack mode that keeps real players
+getting in while a flood is running.
+
+Based on [Outfluencer/Minecraft-XDP-eBPF](https://github.com/Outfluencer/Minecraft-XDP-eBPF),
+which filters Minecraft Java over IPv4. All of its inspection is still here;
+this fork adds the rest of what a public server exposes.
+
+## Compared to upstream
+
+| | Upstream | This fork |
+|---|:---:|:---:|
+| Java handshake / status / login inspection | ✅ | ✅ |
+| SYN throttle per IP | ✅ | ✅ plus status, ping and session limits |
+| Host name filter (`play.example.com`, `*.example.com`) | | ✅ |
+| Bedrock RakNet | | ✅ |
+| Bedrock server list pings answered by the filter itself | | ✅ |
+| Bedrock NetherNet (WebRTC data channels, signaling) | | ✅ |
+| Simple Voice Chat, generic TCP / UDP guards | | ✅ |
+| IPv6 | | ✅ |
+| Retransmit challenge, per-second budgets, proven players | | ✅ |
+| Allow / deny lists, bans without a restart | | ✅ |
+| Restart and upgrade without a gap, filter survives a loader crash | | ✅ |
+| `--check` against the verifier before deploying | | ✅ |
+| Prometheus metrics | ✅ | ✅ plus Grafana dashboard and alert rules |
+| Tests | C unit tests | + in-kernel, end-to-end and load tests with spoofed floods |
+
+## Protected services
 
 | Protected | Transport | What a client has to prove |
 |-----------|-----------|----------------------------|
@@ -20,6 +47,39 @@ an attack mode built for small machines.
 Everything else aimed at a protected port is dropped. IPv6 is either ignored,
 dropped for the protected ports, or inspected by the same rules as IPv4
 (`[xdp] ipv6`).
+
+## How a packet goes through the filter
+
+```mermaid
+flowchart TD
+    P([packet]) --> PORT{protected port?}
+    PORT -- no --> PASS0([pass])
+    PORT -- yes --> FLOW{verified connection?}
+    FLOW -- yes --> RATE{within its packet rate?}
+    RATE -- yes --> PASS1([pass: one hash lookup])
+    RATE -- no --> DROP1([drop])
+    FLOW -- no --> LIST{allow / deny list}
+    LIST -- denied --> DROP2([drop])
+    LIST -- allowed --> PASS2([pass])
+    LIST -- neither --> KNOWN{seen this IP before?}
+    KNOWN -- yes --> LIMIT{per-IP limit}
+    LIMIT -- exceeded --> DROP3([drop])
+    KNOWN -- "no, and a flood is on" --> CHAL{retransmit of a dropped opener?}
+    CHAL -- "no, first try" --> DROP4([drop, the client retries by itself])
+    CHAL -- yes --> BUDGET
+    KNOWN -- "no, quiet times" --> BUDGET
+    LIMIT -- ok --> BUDGET{proven player, or budget left this second?}
+    BUDGET -- no --> DROP5([drop])
+    BUDGET -- yes --> INSPECT{"protocol inspection<br/>handshake, host, login / RakNet / STUN / TLS"}
+    INSPECT -- invalid --> DROP6([drop])
+    INSPECT -- valid --> TRACK([pass and remember as verified])
+```
+
+A spoofed flood never retransmits, so during an attack it is stopped by the
+challenge at the cost of one array access per packet and leaves nothing in
+the tables. Bots with real addresses are held back by the per-IP limits and
+the budgets, which players who have been online for a few minutes do not
+spend.
 
 ## Features
 
@@ -262,6 +322,13 @@ alert rules for vmalert / Prometheus and a Grafana dashboard.
 
 ## Tests
 
+Every change runs through four layers: the parsers as native C with
+ASan/UBSan, the compiled BPF program inside the kernel with crafted packets
+(653 checks), the real loader between a client and stand-in servers on a veth
+pair (219 checks), and spoofed floods from every CPU while real clients keep
+playing (118 checks: players lose nothing, newcomers still get in, the flood
+leaves no state behind).
+
 ```bash
 dev/run.sh                    # everything, inside a container (needs Docker)
 cargo test                    # Rust tests + native C tests of the parsers (ASan/UBSan)
@@ -286,3 +353,10 @@ Please always check if you are running as root if any error occurred. If you are
 ### Players can not connect after enabling `hosts`
 The name they use is missing from the list; `minecraft_bad_host` in the
 metrics counts those handshakes.
+
+## Credits and license
+
+The original filter and its Java inspection are by
+[Outfluencer](https://github.com/Outfluencer); consider supporting the
+upstream project. Licensed like upstream: BSD-3-Clause, with the BPF program
+in `xdp/` dual-licensed GPL-2.0 OR BSD-3-Clause, see [LICENSE](LICENSE).
