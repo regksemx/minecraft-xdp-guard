@@ -171,3 +171,36 @@ func TestTickStep(t *testing.T) {
 		t.Error(compact(1_840_000_000))
 	}
 }
+
+func TestPage(t *testing.T) {
+	st, now := newTestStore(t)
+	h := st.handler()
+	get := func(url string) string {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("%s: %d", url, rec.Code)
+		}
+		return rec.Body.String()
+	}
+	if body := get("/"); !strings.Contains(body, "Collecting data") || !strings.Contains(body, "No installations") {
+		t.Fatal("empty page should say it is collecting data")
+	}
+	post(t, h, good)
+	for i := 0; i < 30; i++ {
+		st.snap()
+		*now = now.Add(time.Hour)
+	}
+	post(t, h, good) // a live installation keeps reporting
+	body := get("/?days=7")
+	for _, want := range []string{"<b>7 days</b>", "Java", "1.0.1", "driver", "6.12"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/nope", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown path: %d", rec.Code)
+	}
+}

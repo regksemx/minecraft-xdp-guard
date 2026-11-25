@@ -7,8 +7,8 @@ Java, Bedrock, NetherNet, Simple Voice Chat and IPv6. Floods are dropped
 before the kernel, your proxy or your server spends anything on them.
 
 [![Release](https://img.shields.io/github/v/release/regksemx/minecraft-xdp-guard?label=release)](../../releases/latest)
-[![Servers](https://img.shields.io/endpoint?url=https%3A%2F%2Fstats.olune.me%2Fv1%2Fbadge%2Fservers)](#telemetry)
-[![Players](https://img.shields.io/endpoint?url=https%3A%2F%2Fstats.olune.me%2Fv1%2Fbadge%2Fplayers)](#telemetry)
+[![Servers](https://img.shields.io/endpoint?url=https%3A%2F%2Fstats.olune.me%2Fv1%2Fbadge%2Fservers)](https://stats.olune.me/)
+[![Players](https://img.shields.io/endpoint?url=https%3A%2F%2Fstats.olune.me%2Fv1%2Fbadge%2Fplayers)](https://stats.olune.me/)
 ![Kernel](https://img.shields.io/badge/linux-5.11%2B-informational)
 ![License](https://img.shields.io/badge/license-BSD--3--Clause%20%2F%20GPL--2.0-blue)
 
@@ -17,14 +17,17 @@ before the kernel, your proxy or your server spends anything on them.
 [How it works](#how-it-works) ·
 [Operating](#operating) ·
 [FAQ](#faq) ·
-[All options](docs/configuration.md)
+[All options](docs/configuration.md) ·
+[Live stats](https://stats.olune.me/)
 
 </div>
 
+<a href="https://stats.olune.me/">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://stats.olune.me/v1/chart.svg?theme=dark">
   <img alt="Servers protected, players connected and packets dropped today, live" src="https://stats.olune.me/v1/chart.svg">
 </picture>
+</a>
 
 ## Why
 
@@ -272,8 +275,8 @@ gone.
 
 Like [bStats](https://bstats.org) for plugins, the loader sends a small
 anonymous report every 30 minutes, so that the project can see how many
-servers and players it protects. The totals are public:
-[stats.olune.me/v1/summary](https://stats.olune.me/v1/summary).
+servers and players it protects. The totals are public, with charts of
+players, servers, versions and setups: **[stats.olune.me](https://stats.olune.me/)**.
 
 <details>
 <summary>A report is exactly this, nothing more</summary>

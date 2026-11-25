@@ -1,6 +1,7 @@
 // Command collector receives the anonymous usage reports of xdp-loader
 // (loader/telemetry.rs) and publishes the totals.
 //
+//	GET  /                  the public statistics page (?days=7|30|90)
 //	POST /v1/report         one report, JSON, at most 4 KiB
 //	GET  /v1/summary        servers and players right now, packets dropped
 //	GET  /v1/chart.svg      players over the last 30 days (?theme=dark)
@@ -359,6 +360,19 @@ func (st *store) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /v1/summary", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, st.summary())
+	})
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, req *http.Request) {
+		days := 30
+		switch req.URL.Query().Get("days") {
+		case "7":
+			days = 7
+		case "90":
+			days = 90
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'")
+		_, _ = w.Write(renderPage(st.summary(), st.history(days), st.now(), days))
 	})
 	mux.HandleFunc("GET /v1/chart.svg", func(w http.ResponseWriter, req *http.Request) {
 		theme := themes["light"]
