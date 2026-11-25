@@ -117,6 +117,19 @@ program, and LRU maps bound the memory.
 
 ## Installation (Linux)
 
+### Download a release
+
+[Releases](../../releases) have a static x86_64 `xdp-loader` (musl, no
+dependencies on the target machine) with the BPF program built in:
+
+```bash
+chmod +x xdp-loader
+sudo ./xdp-loader --check   # does this kernel accept the filter?
+sudo ./xdp-loader eth0
+```
+
+Or build it yourself:
+
 ### Prerequisites
 - Linux kernel 5.11 or newer (developed and tested on 6.8)
 - Rust toolchain (stable, 1.98 or newer)
