@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="302" viewBox="0 0 880 302" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="A Bedrock player during UDP floods">
+<title>A Bedrock player during UDP floods</title>
+<rect x="0.5" y="0.5" width="879" height="301" rx="8" fill="#0d1117" stroke="rgba(255,255,255,0.10)"/>
+<line x1="359.5" y1="130.0" x2="359.5" y2="278.0" stroke="#262c36" stroke-width="1"/>
+<line x1="505.0" y1="130.0" x2="505.0" y2="278.0" stroke="#262c36" stroke-width="1"/>
+<line x1="650.5" y1="130.0" x2="650.5" y2="278.0" stroke="#262c36" stroke-width="1"/>
+<line x1="796.0" y1="130.0" x2="796.0" y2="278.0" stroke="#262c36" stroke-width="1"/>
+<text x="24.0" y="34.0" font-size="17" font-weight="600" fill="#efefef" text-anchor="start">A Bedrock player during UDP floods</text>
+<text x="24.0" y="56.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">Share of the player's round trips answered while each flood runs at 1.49 Mpps. Every lost one stalls the</text>
+<text x="24.0" y="74.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">player for a 1 s timeout. The STUN flood aims at the NetherNet port, not at the game socket.</text>
+<rect x="24.0" y="96.0" width="12.0" height="12.0" rx="3" fill="#338ced"/>
+<text x="46.0" y="106.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">with the filter</text>
+<rect x="167.0" y="96.0" width="12.0" height="12.0" rx="3" fill="#e76624"/>
+<text x="189.0" y="106.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">without the filter</text>
+<text x="24.0" y="151.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">Bedrock ping</text>
+<path d="M214.0,136.0 H792.0 Q796.0,136.0 796.0,140.0 V142.0 Q796.0,146.0 792.0,146.0 H214.0 Z" fill="#338ced"/>
+<text x="802.0" y="145.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">100%</text>
+<path d="M214.0,148.0 H404.0 Q408.0,148.0 408.0,152.0 V154.0 Q408.0,158.0 404.0,158.0 H214.0 Z" fill="#e76624"/>
+<text x="414.0" y="157.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">33%</text>
+<text x="24.0" y="189.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">Bedrock connect</text>
+<path d="M214.0,174.0 H792.0 Q796.0,174.0 796.0,178.0 V180.0 Q796.0,184.0 792.0,184.0 H214.0 Z" fill="#338ced"/>
+<text x="802.0" y="183.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">100%</text>
+<path d="M214.0,186.0 H501.0 Q505.0,186.0 505.0,190.0 V192.0 Q505.0,196.0 501.0,196.0 H214.0 Z" fill="#e76624"/>
+<text x="511.0" y="195.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">50%</text>
+<text x="24.0" y="227.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">NetherNet STUN</text>
+<path d="M214.0,212.0 H792.0 Q796.0,212.0 796.0,216.0 V218.0 Q796.0,222.0 792.0,222.0 H214.0 Z" fill="#338ced"/>
+<text x="802.0" y="221.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">100%</text>
+<path d="M214.0,224.0 H792.0 Q796.0,224.0 796.0,228.0 V230.0 Q796.0,234.0 792.0,234.0 H214.0 Z" fill="#e76624"/>
+<text x="802.0" y="233.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">100%</text>
+<text x="24.0" y="265.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">UDP junk</text>
+<path d="M214.0,250.0 H792.0 Q796.0,250.0 796.0,254.0 V256.0 Q796.0,260.0 792.0,260.0 H214.0 Z" fill="#338ced"/>
+<text x="802.0" y="259.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">100%</text>
+<path d="M214.0,262.0 H501.0 Q505.0,262.0 505.0,266.0 V268.0 Q505.0,272.0 501.0,272.0 H214.0 Z" fill="#e76624"/>
+<text x="511.0" y="271.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">50%</text>
+<text x="214.0" y="296.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">0%</text>
+<text x="359.5" y="296.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">25%</text>
+<text x="505.0" y="296.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">50%</text>
+<text x="650.5" y="296.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">75%</text>
+<text x="796.0" y="296.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">100%</text>
+<line x1="214.0" y1="130.0" x2="214.0" y2="278.0" stroke="#474747" stroke-width="1"/>
+</svg>

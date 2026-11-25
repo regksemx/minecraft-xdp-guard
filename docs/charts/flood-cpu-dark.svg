@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="462" viewBox="0 0 880 462" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="CPU the flood costs">
+<title>CPU the flood costs</title>
+<rect x="0.5" y="0.5" width="879" height="461" rx="8" fill="#0d1117" stroke="rgba(255,255,255,0.10)"/>
+<line x1="359.5" y1="130.0" x2="359.5" y2="430.0" stroke="#262c36" stroke-width="1"/>
+<line x1="505.0" y1="130.0" x2="505.0" y2="430.0" stroke="#262c36" stroke-width="1"/>
+<line x1="650.5" y1="130.0" x2="650.5" y2="430.0" stroke="#262c36" stroke-width="1"/>
+<line x1="796.0" y1="130.0" x2="796.0" y2="430.0" stroke="#262c36" stroke-width="1"/>
+<text x="24.0" y="34.0" font-size="17" font-weight="600" fill="#efefef" text-anchor="start">CPU the flood costs</text>
+<text x="24.0" y="56.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">Busy cores of the 6-core machine while each flood runs at 1.49 Mpps (the retransmitting SYN flood at</text>
+<text x="24.0" y="74.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">50K pps), including the flood generator itself. Same rate, same machine: the gap is the network stack.</text>
+<rect x="24.0" y="96.0" width="12.0" height="12.0" rx="3" fill="#338ced"/>
+<text x="46.0" y="106.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">with the filter</text>
+<rect x="167.0" y="96.0" width="12.0" height="12.0" rx="3" fill="#e76624"/>
+<text x="189.0" y="106.0" font-size="12.5" font-weight="400" fill="#9c9c9c" text-anchor="start">without the filter</text>
+<text x="24.0" y="151.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">SYN</text>
+<path d="M214.0,136.0 H332.1 Q336.1,136.0 336.1,140.0 V142.0 Q336.1,146.0 332.1,146.0 H214.0 Z" fill="#338ced"/>
+<text x="342.1" y="145.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.8</text>
+<path d="M214.0,148.0 H649.4 Q653.4,148.0 653.4,152.0 V154.0 Q653.4,158.0 649.4,158.0 H214.0 Z" fill="#e76624"/>
+<text x="659.4" y="157.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">3.0</text>
+<text x="24.0" y="189.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">ACK</text>
+<path d="M214.0,174.0 H307.1 Q311.1,174.0 311.1,178.0 V180.0 Q311.1,184.0 307.1,184.0 H214.0 Z" fill="#338ced"/>
+<text x="317.1" y="183.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.7</text>
+<path d="M214.0,186.0 H535.9 Q539.9,186.0 539.9,190.0 V192.0 Q539.9,196.0 535.9,196.0 H214.0 Z" fill="#e76624"/>
+<text x="545.9" y="195.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">2.2</text>
+<text x="24.0" y="227.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">Java handshake</text>
+<path d="M214.0,212.0 H312.2 Q316.2,212.0 316.2,216.0 V218.0 Q316.2,222.0 312.2,222.0 H214.0 Z" fill="#338ced"/>
+<text x="322.2" y="221.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.7</text>
+<path d="M214.0,224.0 H593.4 Q597.4,224.0 597.4,228.0 V230.0 Q597.4,234.0 593.4,234.0 H214.0 Z" fill="#e76624"/>
+<text x="603.4" y="233.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">2.6</text>
+<text x="24.0" y="265.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">SYN + retransmit</text>
+<path d="M214.0,250.0 H237.3 Q241.3,250.0 241.3,254.0 V256.0 Q241.3,260.0 237.3,260.0 H214.0 Z" fill="#338ced"/>
+<text x="247.3" y="259.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.2</text>
+<path d="M214.0,262.0 H254.4 Q258.4,262.0 258.4,266.0 V268.0 Q258.4,272.0 254.4,272.0 H214.0 Z" fill="#e76624"/>
+<text x="264.4" y="271.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.3</text>
+<text x="24.0" y="303.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">Bedrock ping</text>
+<path d="M214.0,288.0 H338.4 Q342.4,288.0 342.4,292.0 V294.0 Q342.4,298.0 338.4,298.0 H214.0 Z" fill="#338ced"/>
+<text x="348.4" y="297.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.9</text>
+<path d="M214.0,300.0 H458.4 Q462.4,300.0 462.4,304.0 V306.0 Q462.4,310.0 458.4,310.0 H214.0 Z" fill="#e76624"/>
+<text x="468.4" y="309.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">1.7</text>
+<text x="24.0" y="341.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">Bedrock connect</text>
+<path d="M214.0,326.0 H366.0 Q370.0,326.0 370.0,330.0 V332.0 Q370.0,336.0 366.0,336.0 H214.0 Z" fill="#338ced"/>
+<text x="376.0" y="335.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">1.1</text>
+<path d="M214.0,338.0 H485.0 Q489.0,338.0 489.0,342.0 V344.0 Q489.0,348.0 485.0,348.0 H214.0 Z" fill="#e76624"/>
+<text x="495.0" y="347.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">1.9</text>
+<text x="24.0" y="379.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">NetherNet STUN</text>
+<path d="M214.0,364.0 H370.4 Q374.4,364.0 374.4,368.0 V370.0 Q374.4,374.0 370.4,374.0 H214.0 Z" fill="#338ced"/>
+<text x="380.4" y="373.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">1.1</text>
+<path d="M214.0,376.0 H487.5 Q491.5,376.0 491.5,380.0 V382.0 Q491.5,386.0 487.5,386.0 H214.0 Z" fill="#e76624"/>
+<text x="497.5" y="385.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">1.9</text>
+<text x="24.0" y="417.0" font-size="12.5" font-weight="400" fill="#efefef" text-anchor="start">UDP junk</text>
+<path d="M214.0,402.0 H324.5 Q328.5,402.0 328.5,406.0 V408.0 Q328.5,412.0 324.5,412.0 H214.0 Z" fill="#338ced"/>
+<text x="334.5" y="411.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">0.8</text>
+<path d="M214.0,414.0 H466.8 Q470.8,414.0 470.8,418.0 V420.0 Q470.8,424.0 466.8,424.0 H214.0 Z" fill="#e76624"/>
+<text x="476.8" y="423.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="start" style="font-variant-numeric:tabular-nums">1.8</text>
+<text x="214.0" y="448.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">0</text>
+<text x="359.5" y="448.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">1</text>
+<text x="505.0" y="448.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">2</text>
+<text x="650.5" y="448.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">3</text>
+<text x="796.0" y="448.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="middle" style="font-variant-numeric:tabular-nums">4</text>
+<line x1="214.0" y1="130.0" x2="214.0" y2="430.0" stroke="#474747" stroke-width="1"/>
+<text x="852.0" y="448.0" font-size="11" font-weight="400" fill="#9c9c9c" text-anchor="end">cores</text>
+</svg>

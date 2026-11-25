@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="214" viewBox="0 0 880 214" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="The biggest SYN flood the machine takes in">
+<title>The biggest SYN flood the machine takes in</title>
+<rect x="0.5" y="0.5" width="879" height="213" rx="8" fill="#ffffff" stroke="rgba(11,11,11,0.10)"/>
+<line x1="330.4" y1="114.0" x2="330.4" y2="170.0" stroke="#e7e7e7" stroke-width="1"/>
+<line x1="446.8" y1="114.0" x2="446.8" y2="170.0" stroke="#e7e7e7" stroke-width="1"/>
+<line x1="563.2" y1="114.0" x2="563.2" y2="170.0" stroke="#e7e7e7" stroke-width="1"/>
+<line x1="679.6" y1="114.0" x2="679.6" y2="170.0" stroke="#e7e7e7" stroke-width="1"/>
+<line x1="796.0" y1="114.0" x2="796.0" y2="170.0" stroke="#e7e7e7" stroke-width="1"/>
+<text x="24.0" y="34.0" font-size="17" font-weight="600" fill="#191919" text-anchor="start">The biggest SYN flood the machine takes in</text>
+<text x="24.0" y="56.0" font-size="12.5" font-weight="400" fill="#666666" text-anchor="start">A SYN flood stepping up from 0.5 Mpps to as fast as the generator can send. Without the filter the</text>
+<text x="24.0" y="74.0" font-size="12.5" font-weight="400" fill="#666666" text-anchor="start">kernel's TCP stack saturates the machine at 1.9 Mpps (4 cores busy); with it, 9.0 Mpps take 4 cores.</text>
+<text x="24.0" y="131.0" font-size="12.5" font-weight="400" fill="#191919" text-anchor="start">with the filter</text>
+<path d="M214.0,120.0 H733.3 Q737.3,120.0 737.3,124.0 V130.0 Q737.3,134.0 733.3,134.0 H214.0 Z" fill="#257de0"/>
+<text x="743.3" y="133.0" font-size="11" font-weight="400" fill="#666666" text-anchor="start" style="font-variant-numeric:tabular-nums">9.0</text>
+<text x="24.0" y="161.0" font-size="12.5" font-weight="400" fill="#191919" text-anchor="start">without the filter</text>
+<path d="M214.0,150.0 H321.0 Q325.0,150.0 325.0,154.0 V160.0 Q325.0,164.0 321.0,164.0 H214.0 Z" fill="#f47230"/>
+<text x="331.0" y="163.0" font-size="11" font-weight="400" fill="#666666" text-anchor="start" style="font-variant-numeric:tabular-nums">1.9</text>
+<text x="214.0" y="188.0" font-size="11" font-weight="400" fill="#666666" text-anchor="middle" style="font-variant-numeric:tabular-nums">0</text>
+<text x="330.4" y="188.0" font-size="11" font-weight="400" fill="#666666" text-anchor="middle" style="font-variant-numeric:tabular-nums">2</text>
+<text x="446.8" y="188.0" font-size="11" font-weight="400" fill="#666666" text-anchor="middle" style="font-variant-numeric:tabular-nums">4</text>
+<text x="563.2" y="188.0" font-size="11" font-weight="400" fill="#666666" text-anchor="middle" style="font-variant-numeric:tabular-nums">6</text>
+<text x="679.6" y="188.0" font-size="11" font-weight="400" fill="#666666" text-anchor="middle" style="font-variant-numeric:tabular-nums">8</text>
+<text x="796.0" y="188.0" font-size="11" font-weight="400" fill="#666666" text-anchor="middle" style="font-variant-numeric:tabular-nums">10</text>
+<line x1="214.0" y1="114.0" x2="214.0" y2="170.0" stroke="#c2c2c2" stroke-width="1"/>
+<text x="852.0" y="200.0" font-size="11" font-weight="400" fill="#666666" text-anchor="end">million packets per second</text>
+</svg>

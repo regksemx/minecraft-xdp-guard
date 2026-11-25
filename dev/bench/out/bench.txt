@@ -1,0 +1,13 @@
+packet                                          cost  verdict
+other port (not protected)                     13 ns  pass
+Java: packet of a verified player              22 ns  pass
+Bedrock: datagram of a verified session        18 ns  pass
+ACK flood (unknown connection)                 21 ns  drop
+SYN flood, unknown ip (challenge)              19 ns  drop
+SYN flood, known ip (per ip limit)             18 ns  drop
+handshake flood without tcp handshake          21 ns  drop
+Bedrock: garbage datagram                      17 ns  drop
+Bedrock: game data without session             17 ns  drop
+Bedrock: ping flood, unknown ip (challenge)    24 ns  drop
+Bedrock: ping flood, known ip (per ip limit)   23 ns  drop
+Bedrock: connection request flood, unknown ip   30 ns  drop

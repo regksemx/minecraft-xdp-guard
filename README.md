@@ -81,6 +81,28 @@ the tables. Bots with real addresses are held back by the per-IP limits and
 the budgets, which players who have been online for a few minutes do not
 spend.
 
+## Under attack
+
+Eight kinds of spoofed floods at 1.49 million packets per second, the rate of
+a saturated 1 Gbit/s port, against a test server with and without the filter:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/charts/flood-reach-dark.svg">
+  <img alt="Packets per second reaching the server during eight floods: 1.49 million without the filter, about a hundred with it" src="docs/charts/flood-reach-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/charts/flood-cpu-dark.svg">
+  <img alt="Busy cores per flood at 1.49 Mpps, with and without the filter" src="docs/charts/flood-cpu-light.svg">
+</picture>
+
+Without the filter the same machine runs out of CPU at 1.9 million SYNs per
+second; with it, it takes in 9 million. A Bedrock player loses half of their
+packets during a UDP flood without the filter and none with it. The price:
+while a flood of unknown addresses is on, a player connecting from an address
+the filter has never seen gets in about a second later. All numbers, the
+method and how to reproduce them: [docs/benchmarks.md](docs/benchmarks.md).
+
 ## Features
 
 - **Protocol inspection**: Java handshake, status, ping and login packets
@@ -312,6 +334,50 @@ dropped and why. [`deploy/monitoring`](deploy/monitoring) has a scrape job,
 alert rules for vmalert / Prometheus and a Grafana dashboard.
 
 **`[logging]`** — `level`, `file_max_mb`.
+
+**`[telemetry]`** — `enabled` (default `true`), `endpoint`. See
+[Telemetry](#telemetry).
+
+## Telemetry
+
+Like [bStats](https://bstats.org) for plugins, the loader sends a small
+anonymous report every 30 minutes, so that the project can see how many
+servers and players it protects. The totals are public:
+[stats.olune.me/v1/summary](https://stats.olune.me/v1/summary).
+
+A report is exactly this, nothing more:
+
+```json
+{
+  "v": 1,
+  "id": "3f9c2a7e5b1d4c8e9a0f6b2d7e1c5a93",
+  "version": "1.0.1",
+  "kernel": "6.12.38+deb13-amd64",
+  "arch": "x86_64",
+  "cpus": 12,
+  "mode": "driver",
+  "features": ["java", "hosts", "bedrock", "metrics"],
+  "players": {"java": 412, "bedrock": 57, "nethernet": 9, "voice": 130},
+  "packets": {"incoming": 81234567, "dropped": 80998321},
+  "uptime_secs": 86400,
+  "interval_secs": 1800
+}
+```
+
+- `id` is random, made on the first start and kept in `telemetry-id` next to
+  the config file. It only tells reports of the same installation apart.
+- `players` are the verified connections at that moment, read from the
+  filter's own tables; `null` if they are not pinned.
+- `packets` counts since the previous report and is only there with
+  `[metrics] enabled = true`, because the program counts nothing otherwise.
+- No IP addresses, host names, ports or configuration values are sent. The
+  collector ([`collector/`](collector)) stores the latest report per id and
+  does not store or log the address a report came from.
+
+Turn it off with `[telemetry] enabled = false`, or with the environment
+variable `MINECRAFT_XDP_TELEMETRY=off` (for example `Environment=` in the
+systemd unit). The loader says at every start whether and where it reports.
+A failed report is ignored and never affects the filter.
 
 ## Things to know
 
