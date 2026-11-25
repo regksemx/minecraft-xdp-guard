@@ -3,6 +3,7 @@
 //
 //	POST /v1/report         one report, JSON, at most 4 KiB
 //	GET  /v1/summary        servers and players right now, packets dropped
+//	GET  /v1/chart.svg      players over the last 30 days (?theme=dark)
 //	GET  /v1/badge/servers  shields.io endpoint badge
 //	GET  /v1/badge/players  shields.io endpoint badge
 //
@@ -127,12 +128,27 @@ type day struct {
 	Dropped  uint64 `json:"dropped"`
 }
 
+// snapshot is the summary at one hour, the history behind /v1/chart.svg.
+type snapshot struct {
+	T         time.Time `json:"t"`
+	Servers   int       `json:"servers"`
+	Players   uint64    `json:"players"`
+	Java      uint32    `json:"java"`
+	Bedrock   uint32    `json:"bedrock"`
+	NetherNet uint32    `json:"nethernet"`
+}
+
+// a year of hourly snapshots
+const maxSnapshots = 24 * 366
+
 type state struct {
 	Installs map[string]*entry `json:"installs"`
 	// UTC date -> packets reported that day
 	Days map[string]*day `json:"days"`
 	// all time, never forgotten
 	DroppedTotal uint64 `json:"dropped_total"`
+	// hourly, oldest first
+	Snapshots []snapshot `json:"snapshots"`
 }
 
 type store struct {
@@ -253,6 +269,38 @@ func majorMinor(kernel string) string {
 	return parts[0] + "." + strings.TrimFunc(parts[1], func(r rune) bool { return r < '0' || r > '9' })
 }
 
+// snap records the current summary once per hour (on the hour, UTC).
+func (st *store) snap() {
+	sum := st.summary()
+	hour := st.now().UTC().Truncate(time.Hour)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if n := len(st.s.Snapshots); n > 0 && !st.s.Snapshots[n-1].T.Before(hour) {
+		return
+	}
+	st.s.Snapshots = append(st.s.Snapshots, snapshot{
+		T: hour, Servers: sum.Servers, Players: sum.PlayersTotal,
+		Java: sum.Players.Java, Bedrock: sum.Players.Bedrock, NetherNet: sum.Players.NetherNet,
+	})
+	if extra := len(st.s.Snapshots) - maxSnapshots; extra > 0 {
+		st.s.Snapshots = append([]snapshot(nil), st.s.Snapshots[extra:]...)
+	}
+}
+
+// history returns the snapshots of the last `days` days.
+func (st *store) history(days int) []snapshot {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	from := st.now().Add(-time.Duration(days) * 24 * time.Hour)
+	var out []snapshot
+	for _, s := range st.s.Snapshots {
+		if !s.T.Before(from) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // forget drops installations not heard of for a month and days older than a
 // year, so that the file can not grow without bound.
 func (st *store) forget() {
@@ -312,6 +360,16 @@ func (st *store) handler() http.Handler {
 	mux.HandleFunc("GET /v1/summary", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, st.summary())
 	})
+	mux.HandleFunc("GET /v1/chart.svg", func(w http.ResponseWriter, req *http.Request) {
+		theme := themes["light"]
+		if req.URL.Query().Get("theme") == "dark" {
+			theme = themes["dark"]
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		// GitHub's image proxy keeps it no longer than this
+		w.Header().Set("Cache-Control", "public, max-age=600")
+		_, _ = w.Write(renderChart(theme, st.summary(), st.history(30), st.now()))
+	})
 	mux.HandleFunc("GET /v1/badge/{what}", func(w http.ResponseWriter, req *http.Request) {
 		sum := st.summary()
 		var label string
@@ -339,6 +397,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func compact(v uint64) string {
 	switch {
+	case v >= 1_000_000_000:
+		return fmt.Sprintf("%.1fB", float64(v)/1e9)
 	case v >= 1_000_000:
 		return fmt.Sprintf("%.1fM", float64(v)/1e6)
 	case v >= 10_000:
@@ -368,6 +428,7 @@ func main() {
 	}
 	go func() {
 		for range time.Tick(time.Minute) {
+			st.snap()
 			st.forget()
 			if err := st.save(); err != nil {
 				log.Printf("save: %v", err)
