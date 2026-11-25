@@ -15,5 +15,8 @@ ENV PATH=/root/.cargo/bin:$PATH
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libclang-rt-dev && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-# static x86_64 build from any host, see dev/build-x86_64.sh
-RUN rustup target add x86_64-unknown-linux-musl
+# static x86_64 build from any host, see dev/build-x86_64.sh; the C compiler
+# is for the bits of ring (rustls, the telemetry reports) written in C
+RUN rustup target add x86_64-unknown-linux-musl && rustup component add rustfmt clippy
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross && \
+    rm -rf /var/lib/apt/lists/*

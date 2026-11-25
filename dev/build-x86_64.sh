@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 dev/run.sh bash -c '
+    CC_x86_64_unknown_linux_musl=$(command -v x86_64-linux-musl-gcc || command -v x86_64-linux-gnu-gcc) \
     RUSTFLAGS="-C linker=rust-lld" cargo build --release --target x86_64-unknown-linux-musl &&
     mkdir -p dist &&
     cp target/x86_64-unknown-linux-musl/release/xdp-loader dist/xdp-loader-x86_64'
