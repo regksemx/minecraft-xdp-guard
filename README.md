@@ -59,7 +59,7 @@ program, and LRU maps bound the memory.
 
 ### Prerequisites
 - Linux kernel 5.11 or newer (developed and tested on 6.8)
-- Rust toolchain (stable)
+- Rust toolchain (stable, 1.98 or newer)
 - **System Dependencies**:
   ```bash
   sudo apt update

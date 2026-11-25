@@ -52,9 +52,9 @@ pub fn is_wildcard(normalized: &str) -> bool {
 /// The eBPF program reports "not hashable" as 0 and therefore maps a real
 /// hash of 0 to 1; so does this function.
 pub fn hash(normalized: &str) -> u64 {
-    let hash = normalized
-        .bytes()
-        .fold(FNV64_OFFSET, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(FNV64_PRIME));
+    let hash = normalized.bytes().fold(FNV64_OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(FNV64_PRIME)
+    });
     if hash == 0 { 1 } else { hash }
 }
 
@@ -106,8 +106,12 @@ mod tests {
     fn wildcard_hash_continues_after_star_dot() {
         // FNV64_WILD in xdp/protocol.h is the state after "*."; the filter
         // continues from it with the labels after the first dot
-        let wild = "*.".bytes().fold(FNV64_OFFSET, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV64_PRIME));
-        let rest = "example.com".bytes().fold(wild, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV64_PRIME));
+        let wild = "*.".bytes().fold(FNV64_OFFSET, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(FNV64_PRIME)
+        });
+        let rest = "example.com"
+            .bytes()
+            .fold(wild, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV64_PRIME));
         assert_eq!(hash("*.example.com"), rest);
     }
 }

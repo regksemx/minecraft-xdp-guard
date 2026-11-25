@@ -1023,7 +1023,12 @@ impl BedrockConfig {
             }
             self.pong_from
                 .parse::<std::net::SocketAddr>()
-                .with_context(|| format!("[bedrock] pong_from: '{}' is not an address like 127.0.0.1:19132", self.pong_from))?;
+                .with_context(|| {
+                    format!(
+                        "[bedrock] pong_from: '{}' is not an address like 127.0.0.1:19132",
+                        self.pong_from
+                    )
+                })?;
         }
         check_range("[bedrock] pong_refresh_secs", self.pong_refresh_secs, 1, 60)
     }
@@ -1233,7 +1238,10 @@ mod tests {
         assert!(err.to_string().contains("hardware"));
         assert!(toml::from_str::<Config>("[xdp]\nadopt = \"all\"").is_err());
         assert!(toml::from_str::<Config>("[xdp]\nipv6 = \"filter\"").is_err());
-        assert_eq!(parse("[xdp]\nipv6 = \"inspect\"").xdp.ipv6, Ipv6Mode::Inspect);
+        assert_eq!(
+            parse("[xdp]\nipv6 = \"inspect\"").xdp.ipv6,
+            Ipv6Mode::Inspect
+        );
         assert!(toml::from_str::<Config>("[attack]\nchallenge = \"on\"").is_err());
         let err = toml::from_str::<Config>("[logging]\nlevel = \"verbose\"").unwrap_err();
         assert!(err.to_string().contains("verbose"));
@@ -1242,16 +1250,30 @@ mod tests {
     #[test]
     fn parses_networks() {
         let net = Ipv4Net::parse("203.0.113.7").unwrap();
-        assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(203, 0, 113, 7), 32));
+        assert_eq!(
+            (net.addr, net.prefix_len),
+            (Ipv4Addr::new(203, 0, 113, 7), 32)
+        );
         // host bits are cleared
         let net = Ipv4Net::parse("198.51.100.77/24").unwrap();
-        assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(198, 51, 100, 0), 24));
+        assert_eq!(
+            (net.addr, net.prefix_len),
+            (Ipv4Addr::new(198, 51, 100, 0), 24)
+        );
         let net = Ipv4Net::parse(" 10.1.2.3/8 ").unwrap();
         assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(10, 0, 0, 0), 8));
         let net = Ipv4Net::parse("1.2.3.4/0").unwrap();
         assert_eq!((net.addr, net.prefix_len), (Ipv4Addr::new(0, 0, 0, 0), 0));
 
-        for bad in ["", "1.2.3", "1.2.3.4/33", "1.2.3.4/", "example.com", "::1", "1.2.3.4/-1"] {
+        for bad in [
+            "",
+            "1.2.3",
+            "1.2.3.4/33",
+            "1.2.3.4/",
+            "example.com",
+            "::1",
+            "1.2.3.4/-1",
+        ] {
             assert!(Ipv4Net::parse(bad).is_err(), "must be rejected: {bad}");
         }
 
@@ -1259,7 +1281,11 @@ mod tests {
         assert_eq!(net.to_string(), "198.51.100.0/24");
         assert!(net.contains(Ipv4Addr::new(198, 51, 100, 255)));
         assert!(!net.contains(Ipv4Addr::new(198, 51, 101, 0)));
-        assert!(Ipv4Net::parse("0.0.0.0/0").unwrap().contains(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(
+            Ipv4Net::parse("0.0.0.0/0")
+                .unwrap()
+                .contains(Ipv4Addr::new(8, 8, 8, 8))
+        );
         let host = Ipv4Net::parse("203.0.113.7").unwrap();
         assert!(host.contains(Ipv4Addr::new(203, 0, 113, 7)));
         assert!(!host.contains(Ipv4Addr::new(203, 0, 113, 8)));
@@ -1268,10 +1294,16 @@ mod tests {
     #[test]
     fn parses_ipv6_networks() {
         let net = Ipv6Net::parse("2001:db8::1").unwrap();
-        assert_eq!((net.addr, net.prefix_len), ("2001:db8::1".parse().unwrap(), 128));
+        assert_eq!(
+            (net.addr, net.prefix_len),
+            ("2001:db8::1".parse().unwrap(), 128)
+        );
         // host bits are cleared
         let net = Ipv6Net::parse("2001:db8:1:2:3:4:5:6/48").unwrap();
-        assert_eq!((net.addr, net.prefix_len), ("2001:db8:1::".parse().unwrap(), 48));
+        assert_eq!(
+            (net.addr, net.prefix_len),
+            ("2001:db8:1::".parse().unwrap(), 48)
+        );
         assert_eq!(net.to_string(), "2001:db8:1::/48");
         let net = Ipv6Net::parse("::/0").unwrap();
         assert_eq!((net.addr, net.prefix_len), (Ipv6Addr::UNSPECIFIED, 0));
@@ -1281,7 +1313,10 @@ mod tests {
 
         // the family is told by the colon
         assert!(matches!(IpNet::parse("203.0.113.7").unwrap(), IpNet::V4(_)));
-        assert!(matches!(IpNet::parse("2001:db8::/32").unwrap(), IpNet::V6(_)));
+        assert!(matches!(
+            IpNet::parse("2001:db8::/32").unwrap(),
+            IpNet::V6(_)
+        ));
         let nets = [
             IpNet::parse("10.0.0.0/8").unwrap(),
             IpNet::parse("fd00::/8").unwrap(),
@@ -1294,8 +1329,16 @@ mod tests {
     #[test]
     fn rejects_bad_lists_and_hosts() {
         assert!(parse("[lists]\nallow = [\"nonsense\"]").validate().is_err());
-        assert!(parse("[lists]\ndeny = [\"1.2.3.4/40\"]").validate().is_err());
-        assert!(parse("[lists]\ndeny = [\"2001:db8::/200\"]").validate().is_err());
+        assert!(
+            parse("[lists]\ndeny = [\"1.2.3.4/40\"]")
+                .validate()
+                .is_err()
+        );
+        assert!(
+            parse("[lists]\ndeny = [\"2001:db8::/200\"]")
+                .validate()
+                .is_err()
+        );
         parse("[lists]\nallow = [\"10.0.0.0/8\", \"fd00::/8\"]\ndeny = [\"203.0.113.7\", \"2001:db8::1\"]")
             .validate()
             .unwrap();

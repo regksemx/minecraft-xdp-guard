@@ -201,7 +201,7 @@ impl FloodLog {
             .map(|(stat, name)| (rate(stat), name))
             .filter(|(pps, _)| *pps > 0)
             .collect();
-            reasons.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            reasons.sort_unstable_by_key(|r| std::cmp::Reverse(r.0));
             let reasons = reasons
                 .iter()
                 .take(4)
@@ -210,7 +210,11 @@ impl FloodLog {
                 .join(", ");
             warn!(
                 "{}: dropping {dropped} of {} packets/s ({reasons}); verified {} logins/s, {} bedrock sessions/s",
-                if self.active { "Flood" } else { "Flood started" },
+                if self.active {
+                    "Flood"
+                } else {
+                    "Flood started"
+                },
                 rate(Stat::IncomingPackets),
                 rate(Stat::JavaVerified),
                 rate(Stat::RaknetVerified),

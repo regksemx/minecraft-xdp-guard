@@ -1,3 +1,4 @@
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -193,7 +194,11 @@ fn prepare_state(config: &Config) -> Result<Vec<(&'static str, PathBuf)>> {
 /// Splits a total per second over the cpus, since the eBPF program counts
 /// per cpu. 0 (unlimited) stays 0, everything else is at least 1.
 fn per_cpu(total: u32, cpus: u32) -> u32 {
-    if total == 0 { 0 } else { total.div_ceil(cpus).max(1) }
+    if total == 0 {
+        0
+    } else {
+        total.div_ceil(cpus).max(1)
+    }
 }
 
 /// Current CLOCK_MONOTONIC in nanoseconds, the clock of
@@ -266,7 +271,9 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
     };
 
     if took_over {
-        info!("BPF program attached to interface {interface}: took over the existing attachment without a gap");
+        info!(
+            "BPF program attached to interface {interface}: took over the existing attachment without a gap"
+        );
     } else {
         let (link_id, mode) = attach(program, interface, config.xdp.mode)?;
         if let Some(pin) = &pin {
@@ -315,7 +322,7 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
 
     let cpus = aya::util::nr_cpus()
         .map_err(|(what, e)| anyhow::anyhow!("failed to count cpus ({what}): {e}"))?
-        as u32;
+        .get();
 
     // Push the runtime configuration into the program's `volatile const`
     // globals (BPF .rodata). Each Rust type MUST match its C declaration in
@@ -338,7 +345,10 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
         .collect::<Result<Vec<String>>>()
         .context("[java] hosts")?;
     let host_wildcards = normalized_hosts.iter().any(|host| hosts::is_wildcard(host)) as u8;
-    let allowed_hosts = normalized_hosts.iter().map(|host| hosts::hash(host)).collect::<Vec<u64>>();
+    let allowed_hosts = normalized_hosts
+        .iter()
+        .map(|host| hosts::hash(host))
+        .collect::<Vec<u64>>();
 
     let prometheus = config.metrics.enabled as u8;
     // IPV6_PASS / IPV6_DROP / IPV6_INSPECT in xdp/common.h
@@ -438,7 +448,9 @@ fn load(config: &Config, use_state: bool) -> Result<Loaded> {
         match prepare_state(config) {
             Ok(pins) => pins,
             Err(e) => {
-                warn!("Running without pinned maps (no state across restarts, no `xdp-loader deny`): {e:#}");
+                warn!(
+                    "Running without pinned maps (no state across restarts, no `xdp-loader deny`): {e:#}"
+                );
                 Vec::new()
             }
         }
@@ -558,30 +570,32 @@ fn attach(
     interface: &str,
     mode: ConfigXdpMode,
 ) -> Result<(XdpLinkId, ConfigXdpMode)> {
+    // aya takes interface names as C strings; `interface` stays around for
+    // the log and error messages
+    let ifname =
+        CString::new(interface).with_context(|| format!("invalid interface name '{interface}'"))?;
     match mode {
-        ConfigXdpMode::Auto => match program.attach(interface, XdpMode::Driver) {
+        ConfigXdpMode::Auto => match program.attach(&ifname, XdpMode::Driver) {
             Ok(link) => Ok((link, ConfigXdpMode::Driver)),
             Err(err) => {
                 info!("'{interface}' does not support native XDP ({err}), using generic skb mode");
                 let link = program
-                    .attach(interface, XdpMode::Skb)
+                    .attach(&ifname, XdpMode::Skb)
                     .with_context(|| format!("failed to attach to interface '{interface}'"))?;
                 Ok((link, ConfigXdpMode::Skb))
             }
         },
         ConfigXdpMode::Driver => {
-            let link = program
-                .attach(interface, XdpMode::Driver)
-                .with_context(|| {
-                    format!(
-                        "failed to attach to interface '{interface}' in native driver mode \
+            let link = program.attach(&ifname, XdpMode::Driver).with_context(|| {
+                format!(
+                    "failed to attach to interface '{interface}' in native driver mode \
                      (the NIC driver may not support XDP; try mode = \"skb\")"
-                    )
-                })?;
+                )
+            })?;
             Ok((link, ConfigXdpMode::Driver))
         }
         ConfigXdpMode::Skb => {
-            let link = program.attach(interface, XdpMode::Skb).with_context(|| {
+            let link = program.attach(&ifname, XdpMode::Skb).with_context(|| {
                 format!("failed to attach to interface '{interface}' in skb mode")
             })?;
             Ok((link, ConfigXdpMode::Skb))
@@ -598,7 +612,7 @@ fn fill_hosts(ebpf: &mut Ebpf, hashes: &[u64]) -> Result<()> {
         .context("map 'allowed_hosts' not found")?;
     let mut map: HashMap<_, u64, u8> = HashMap::try_from(map)?;
     for hash in hashes {
-        map.insert(hash, 1, 0)
+        map.insert(hash, &1, 0)
             .context("failed to fill map 'allowed_hosts'")?;
     }
     Ok(())
@@ -614,7 +628,7 @@ fn fill_list<F: deny::Family>(ebpf: &mut Ebpf, name: &str, nets: &[F]) -> Result
         .with_context(|| format!("map '{name}' not found"))?;
     let mut trie: LpmTrie<_, F::Addr, u8> = LpmTrie::try_from(map)?;
     for net in nets {
-        trie.insert(&net.key(), 1, 0)
+        trie.insert(&net.key(), &1, 0)
             .with_context(|| format!("failed to fill map '{name}'"))?;
     }
     Ok(())
@@ -636,7 +650,9 @@ fn flow6_seed() -> u64 {
     match std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
         Ok(boot_id) => hosts::hash(boot_id.trim()),
         Err(e) => {
-            warn!("Cannot read the boot id ({e}); IPv6 connections will not survive a restart of the loader");
+            warn!(
+                "Cannot read the boot id ({e}); IPv6 connections will not survive a restart of the loader"
+            );
             random_seed()
         }
     }
@@ -701,7 +717,7 @@ fn log_protection(config: &Config, cpus: u32, adopt_mode: u8) {
         "Challenge: {:?} (table of {} slots, {} MiB); budgets are split over {cpus} cpus",
         attack.challenge,
         attack.retry_table_slots,
-        u64::from(attack.retry_table_slots) * 8 >> 20
+        (u64::from(attack.retry_table_slots) * 8) >> 20
     );
     if adopt_mode != 0 {
         info!(

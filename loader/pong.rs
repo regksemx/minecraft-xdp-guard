@@ -100,8 +100,12 @@ pub fn start(
         .context("can't take map 'pong_cache'")?;
     let mut cache: Array<MapData, PongCache> = Array::try_from(map)?;
 
-    let socket = UdpSocket::bind(if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })
-        .context("failed to open a socket for the pong refresh")?;
+    let socket = UdpSocket::bind(if server.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .context("failed to open a socket for the pong refresh")?;
     socket.connect(server)?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
 
@@ -121,7 +125,7 @@ pub fn start(
                         data: [0; PONG_MAX],
                     };
                     entry.data[..body.len()].copy_from_slice(&body);
-                    cache.set(0, entry, 0).context("failed to update map 'pong_cache'")
+                    cache.set(0, &entry, 0).context("failed to update map 'pong_cache'")
                 });
                 match refreshed {
                     Ok(()) if answering != Some(true) => {

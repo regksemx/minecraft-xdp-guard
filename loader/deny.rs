@@ -129,7 +129,7 @@ pub fn sync_config<F: Family, T: BorrowMut<MapData>>(
         }
     }
     for net in nets {
-        trie.insert(&net.key(), CONFIG, 0)
+        trie.insert(&net.key(), &CONFIG, 0)
             .with_context(|| format!("failed to fill map '{}'", F::MAP))?;
     }
     Ok(kept)
@@ -174,8 +174,8 @@ impl DenyList {
 
     fn insert(&mut self, net: &IpNet, until: u64) -> Result<()> {
         match net {
-            IpNet::V4(net) => self.v4.insert(&net.key(), until, 0),
-            IpNet::V6(net) => self.v6.insert(&net.key(), until, 0),
+            IpNet::V4(net) => self.v4.insert(&net.key(), &until, 0),
+            IpNet::V6(net) => self.v6.insert(&net.key(), &until, 0),
         }
         .with_context(|| format!("failed to ban {net}"))
     }
