@@ -46,8 +46,68 @@ which filters Minecraft Java over IPv4. All of its inspection is still here.
 
 ## Quick start
 
-You need Linux 5.11 or newer and root. Download the static binary (x86_64,
-no dependencies, the BPF program built in):
+One command on the server (Linux 5.11+, x86_64, root):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/regksemx/minecraft-xdp-guard/main/install.sh | sudo bash
+```
+
+```
+minecraft-xdp-guard installer
+  ✓ Linux 6.12.38+deb13-amd64, x86_64, root, /sys/fs/bpf mounted
+  ✓ interface: eth0, driver igb (--interface to change)
+  found listening:
+    tcp 25565 java (v6)
+    udp 19132 bedrock (v4)
+    udp 24454 voice chat (v4)
+  Host names players connect with, comma separated (empty: any): play.example.com, *.example.com
+  ✓ downloaded 1.0.2, sha256 ok
+  ✓ /etc/minecraft-xdp/config.toml written (hosts: play.example.com, *.example.com)
+  ✓ the kernel accepts the filter (--check)
+  ✓ installed /usr/local/sbin/xdp-loader
+  ✓ minecraft-xdp.service enabled and started
+```
+
+It finds the interface and the game ports that listen on the machine
+(Java 25565, Bedrock 19132, NetherNet signaling, Simple Voice Chat 24454),
+turns on protection for each, inspects IPv6 when they listen on it, switches
+to adopting forwarded connections when Docker publishes them, and writes a
+documented `/etc/minecraft-xdp/config.toml`. Then it installs the latest
+release (checked against its SHA-256) as a systemd service and runs the
+doctor.
+
+**Run it again to upgrade**: the config stays, and the new binary takes over
+the running filter without disconnecting anybody. Options: `--yes` (no
+questions), `--hosts a,b`, `--interface eth0`, `--no-telemetry`,
+`--version v1.0.2`, `--uninstall` (`--purge` removes config and state too).
+
+### The doctor
+
+`sudo xdp-loader doctor` checks the kernel, the interface, the config and the
+running filter against what actually listens on the machine, and says what
+to change:
+
+```
+minecraft-xdp-guard 1.0.2 doctor
+  ✓ kernel 6.12.38+deb13-amd64
+  ✓ the kernel accepts the filter with this configuration
+  ✓ attached to eth0 in native driver mode
+  ✓ players right now: 412 Java, 57 Bedrock, 9 NetherNet, 130 voice chat
+  ✗ udp 24454 (Simple Voice Chat) is listening but not protected
+      → add start_port = 24454 and end_port = 24454 to [voice]
+  ✗ protected ports listen on IPv6, but ipv6 = "pass" lets IPv6 floods around the filter
+      → set [xdp] ipv6 = "inspect"
+  ! [java] hosts is empty: handshakes for the bare IP or any name get through to inspection
+      → list the names players connect with, e.g. hosts = ["play.example.com", "*.example.com"]
+```
+
+Edit `/etc/minecraft-xdp/config.toml`, then `systemctl reload minecraft-xdp`.
+
+<details>
+<summary><b>Install by hand</b></summary>
+
+Download the static binary (x86_64, no dependencies, the BPF program built
+in) and try it:
 
 ```bash
 curl -fLo xdp-loader https://github.com/regksemx/minecraft-xdp-guard/releases/latest/download/xdp-loader
@@ -74,10 +134,12 @@ sudo install -m 644 config.toml /etc/minecraft-xdp/config.toml
 sudo install -m 644 deploy/minecraft-xdp.service /etc/systemd/system/   # set your interface in ExecStart
 sudo systemctl enable --now minecraft-xdp
 ```
+</details>
 
 ### Recipes
 
-Add the blocks for what your server runs; ports are the usual defaults.
+The installer sets these up for the ports it finds. By hand, add the blocks
+for what your server runs; ports are the usual defaults.
 
 <details>
 <summary><b>Bedrock through Geyser</b> (RakNet, udp 19132)</summary>
