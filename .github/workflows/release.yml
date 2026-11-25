@@ -60,9 +60,12 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
+        mkdir -p out
+        cp target/x86_64-unknown-linux-musl/release/xdp-loader xdp/minecraft_filter.o out/
+        # install.sh refuses a download that does not match
+        (cd out && sha256sum xdp-loader minecraft_filter.o > SHA256SUMS)
         gh release create "v${{ steps.version.outputs.current }}" \
-          target/x86_64-unknown-linux-musl/release/xdp-loader \
-          xdp/minecraft_filter.o \
+          out/xdp-loader out/minecraft_filter.o out/SHA256SUMS \
           --title "v${{ steps.version.outputs.current }}" \
           --generate-notes
     - name: Bump patch version
