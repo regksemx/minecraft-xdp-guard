@@ -17,6 +17,10 @@ STATE_DIR = "/sys/fs/bpf/mcxdp-e2e"
 failures = 0
 checks = 0
 
+# the loaders of the tests never report anywhere; dev/e2e/telemetry.py turns
+# this off again for itself
+os.environ.setdefault("MINECRAFT_XDP_TELEMETRY", "off")
+
 
 def sh(command, check=True):
     return subprocess.run(command, shell=True, check=check, capture_output=True, text=True)

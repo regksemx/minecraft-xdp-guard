@@ -6,6 +6,7 @@ mod logging;
 mod metrics;
 mod pong;
 mod shutdown;
+mod telemetry;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -182,7 +183,7 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
     }
 
     let mut filter = ebpf::load_and_attach(interface, config)?;
-    let result = serve(&mut filter, config, shutdown);
+    let result = serve(&mut filter, config, Path::new(&args.config), shutdown);
 
     if result.is_ok() && shutdown.hand_over() {
         // the pinned attachment and maps keep filtering on their own
@@ -198,13 +199,23 @@ fn run(args: &Args, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
 
 /// Publishes metrics and refreshes the pong cache until shutdown is
 /// triggered.
-fn serve(filter: &mut ebpf::Filter, config: &Config, shutdown: &Arc<Shutdown>) -> Result<()> {
+fn serve(
+    filter: &mut ebpf::Filter,
+    config: &Config,
+    config_path: &Path,
+    shutdown: &Arc<Shutdown>,
+) -> Result<()> {
     let stats_thread = metrics::start(&mut filter.ebpf, config, shutdown)?;
     let pong_thread = pong::start(&mut filter.ebpf, config, shutdown)?;
+    let telemetry_thread = telemetry::start(config, config_path, filter.mode, shutdown)?;
 
     shutdown.wait();
 
-    for (name, handle) in [("track-stats", stats_thread), ("pong-refresh", pong_thread)] {
+    for (name, handle) in [
+        ("track-stats", stats_thread),
+        ("pong-refresh", pong_thread),
+        ("telemetry", telemetry_thread),
+    ] {
         if let Some(handle) = handle {
             handle
                 .join()

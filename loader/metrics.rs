@@ -228,6 +228,11 @@ impl FloodLog {
     }
 }
 
+/// Latest totals of the in-kernel counters (incoming, dropped packets), for
+/// the telemetry reports. `None` until the first poll, and for good while
+/// `[metrics]` is disabled (the program then counts nothing).
+pub static LATEST_TOTALS: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+
 /// Starts the metrics machinery if enabled in the config: takes ownership of
 /// the stats map, spawns the polling thread and (when an address is
 /// configured) the HTTP endpoint. Returns the polling thread's handle.
@@ -277,6 +282,12 @@ fn poll_loop(
                 }
                 debug!("Stats: {total:?}");
                 COUNTERS.publish(&total);
+                if let Ok(mut latest) = LATEST_TOTALS.lock() {
+                    *latest = Some((
+                        total.get(Stat::IncomingPackets),
+                        total.get(Stat::DroppedPackets),
+                    ));
+                }
                 flood_log.update(&total, poll_interval);
             }
             Err(e) => {

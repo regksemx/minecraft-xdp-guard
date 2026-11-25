@@ -253,6 +253,19 @@ enabled = false
 # How often the in-kernel statistics are read and published, in seconds.
 poll_secs = 10
 
+[telemetry]
+# Anonymous usage statistics, like bStats for plugins: every 30 minutes the
+# loader sends the version, the kernel version and architecture, the XDP mode,
+# which protections are on, how many players are connected and (with
+# [metrics] enabled) how many packets were dropped. No addresses, host names
+# or configuration values leave the machine. The numbers are public at the
+# endpoint's /v1/summary. The environment variable
+# MINECRAFT_XDP_TELEMETRY=off turns this off as well.
+enabled = true
+
+# Where the reports go.
+endpoint = "https://stats.olune.me/v1/report"
+
 [logging]
 # Verbosity of console and file logging:
 # "off", "error", "warn", "info", "debug" or "trace".
@@ -279,6 +292,7 @@ pub struct Config {
     pub lists: ListsConfig,
     pub xdp: XdpConfig,
     pub metrics: MetricsConfig,
+    pub telemetry: TelemetryConfig,
     pub logging: LoggingConfig,
 }
 
@@ -822,6 +836,29 @@ impl Default for MetricsConfig {
     }
 }
 
+/// `[telemetry]` — anonymous usage statistics, see loader/telemetry.rs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelemetryConfig {
+    /// Send reports; `MINECRAFT_XDP_TELEMETRY=off` overrides it.
+    pub enabled: bool,
+    /// URL the reports are POSTed to.
+    pub endpoint: String,
+    /// Seconds between reports. Undocumented on purpose: only tests and
+    /// self-hosted collectors have a reason to change it.
+    pub interval_secs: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: "https://stats.olune.me/v1/report".into(),
+            interval_secs: 1800,
+        }
+    }
+}
+
 /// `[logging]` — console/file log verbosity and rotation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -940,6 +977,7 @@ impl Config {
         self.lists.deny_nets().context("[lists] deny")?;
         self.xdp.validate()?;
         self.metrics.validate()?;
+        self.telemetry.validate()?;
         self.logging.validate()
     }
 }
@@ -1094,6 +1132,18 @@ impl XdpConfig {
 impl MetricsConfig {
     fn validate(&self) -> Result<()> {
         check_range("[metrics] poll_secs", self.poll_secs, 1, 3_600)
+    }
+}
+
+impl TelemetryConfig {
+    fn validate(&self) -> Result<()> {
+        if !(self.endpoint.starts_with("https://") || self.endpoint.starts_with("http://")) {
+            bail!(
+                "[telemetry] endpoint must be an http(s) URL (got '{}')",
+                self.endpoint
+            );
+        }
+        check_range("[telemetry] interval_secs", self.interval_secs, 10, 86_400)
     }
 }
 

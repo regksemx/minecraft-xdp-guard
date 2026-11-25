@@ -104,6 +104,9 @@ pub struct Filter {
     pub ebpf: Ebpf,
     /// Pin of the attachment, if it could be pinned.
     link_pin: Option<PathBuf>,
+    /// The mode this loader attached in; `None` when it took over the
+    /// attachment of an earlier loader.
+    pub mode: Option<ConfigXdpMode>,
 }
 
 impl Filter {
@@ -270,6 +273,7 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
         _ => false,
     };
 
+    let mut attached_mode = None;
     if took_over {
         info!(
             "BPF program attached to interface {interface}: took over the existing attachment without a gap"
@@ -285,12 +289,14 @@ pub fn load_and_attach(interface: &str, config: &Config) -> Result<Filter> {
                 .with_context(|| format!("failed to pin the attachment at '{}'", pin.display()))?;
         }
         info!("BPF program attached to interface {interface} in {mode} mode");
+        attached_mode = Some(mode);
     }
 
     log_protection(config, cpus, adopt_mode);
     Ok(Filter {
         ebpf,
         link_pin: pin,
+        mode: attached_mode,
     })
 }
 
