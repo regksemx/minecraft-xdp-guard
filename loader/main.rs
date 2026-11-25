@@ -1,5 +1,6 @@
 mod config;
 mod deny;
+mod doctor;
 mod ebpf;
 mod hosts;
 mod logging;
@@ -23,6 +24,9 @@ Usage: xdp-loader [OPTIONS] <INTERFACE>
                                     filter, see `xdp-loader deny --help`
        xdp-loader detach [-c <FILE>] <INTERFACE>
                                     Remove a filter whose loader is gone
+       xdp-loader doctor [-c <FILE>]
+                                    Check the machine, the config and the
+                                    running filter, and say what to change
 
 SIGTERM and SIGINT stop the loader and detach the filter. SIGUSR1 and SIGHUP
 stop the loader but leave the filter attached: the next start replaces it
@@ -114,6 +118,16 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+    if argv.first().is_some_and(|arg| arg == "doctor") {
+        match doctor::run(&argv[1..]) {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(2);
+            }
+        }
     }
     if argv.first().is_some_and(|arg| arg == "detach") {
         if let Err(e) = detach(&argv[1..]) {

@@ -58,11 +58,11 @@ struct Report {
 }
 
 #[derive(Debug, Default, Serialize, PartialEq)]
-struct Players {
-    java: u32,
-    bedrock: u32,
-    nethernet: u32,
-    voice: u32,
+pub struct Players {
+    pub java: u32,
+    pub bedrock: u32,
+    pub nethernet: u32,
+    pub voice: u32,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -208,35 +208,36 @@ impl Reporter {
         }
     }
 
-    /// Verified game connections that saw a packet within their idle
-    /// timeout. Entries of the tables expire lazily, so old ones are skipped
-    /// by the time of their last window.
     fn players(&self) -> Result<Players> {
-        let now = monotonic_ns();
-        let mut players = Players::default();
-        for (name, idle_ns) in [
-            ("verified_tcp", self.tcp_idle_ns),
-            ("verified_udp", self.udp_idle_ns),
-        ] {
-            let map = MapData::from_pin(self.state_dir.join(name))
-                .with_context(|| format!("map '{name}' is not pinned"))?;
-            let flows = HashMap::<MapData, [u8; 12], [u8; 24]>::try_from(Map::LruHashMap(map))?;
-            for (_, entry) in flows.iter().filter_map(Result::ok) {
-                let last_window = u64::from_ne_bytes(entry[0..8].try_into().unwrap());
-                if now.saturating_sub(last_window) > idle_ns {
-                    continue;
-                }
-                match (name, entry[20]) {
-                    ("verified_tcp", FLOW_JAVA | FLOW_ADOPTED) => players.java += 1,
-                    ("verified_udp", FLOW_RAKNET | FLOW_ADOPTED) => players.bedrock += 1,
-                    ("verified_udp", FLOW_ICE) => players.nethernet += 1,
-                    ("verified_udp", FLOW_VOICE) => players.voice += 1,
-                    _ => {}
-                }
+        count_players(&self.state_dir, self.tcp_idle_ns, self.udp_idle_ns)
+    }
+}
+
+/// Verified game connections that saw a packet within their idle
+/// timeout. Entries of the tables expire lazily, so old ones are skipped
+/// by the time of their last window.
+pub fn count_players(state_dir: &Path, tcp_idle_ns: u64, udp_idle_ns: u64) -> Result<Players> {
+    let now = monotonic_ns();
+    let mut players = Players::default();
+    for (name, idle_ns) in [("verified_tcp", tcp_idle_ns), ("verified_udp", udp_idle_ns)] {
+        let map = MapData::from_pin(state_dir.join(name))
+            .with_context(|| format!("map '{name}' is not pinned"))?;
+        let flows = HashMap::<MapData, [u8; 12], [u8; 24]>::try_from(Map::LruHashMap(map))?;
+        for (_, entry) in flows.iter().filter_map(Result::ok) {
+            let last_window = u64::from_ne_bytes(entry[0..8].try_into().unwrap());
+            if now.saturating_sub(last_window) > idle_ns {
+                continue;
+            }
+            match (name, entry[20]) {
+                ("verified_tcp", FLOW_JAVA | FLOW_ADOPTED) => players.java += 1,
+                ("verified_udp", FLOW_RAKNET | FLOW_ADOPTED) => players.bedrock += 1,
+                ("verified_udp", FLOW_ICE) => players.nethernet += 1,
+                ("verified_udp", FLOW_VOICE) => players.voice += 1,
+                _ => {}
             }
         }
-        Ok(players)
     }
+    Ok(players)
 }
 
 /// The protections that are switched on, by name.
