@@ -9,11 +9,15 @@
 # and runs `xdp-loader doctor`. Run it again to upgrade: the new binary takes
 # over the running filter without disconnecting anybody.
 #
+# Releases are checked against their SHA256SUMS and, when an authenticated `gh`
+# is on the machine, against their GitHub build attestation.
+#
 # Options:
 #   --yes                 do not ask, take what was found
 #   --interface IF        the interface players arrive on (default: the one of the default route)
 #   --hosts a,b           host names players connect with ([java] hosts)
-#   --no-telemetry        [telemetry] enabled = false
+#   --telemetry           send anonymous counts without asking (see README#telemetry)
+#   --no-telemetry        [telemetry] enabled = false, without asking
 #   --version vX.Y.Z      a release other than the latest
 #   --binary PATH         install this xdp-loader instead of downloading one
 #   --no-service          do not install or start the systemd unit (containers)
@@ -28,12 +32,13 @@ CONF=$CONF_DIR/config.toml
 LOG_DIR=/var/log/minecraft-xdp
 UNIT=/etc/systemd/system/minecraft-xdp.service
 
-yes=0 interface="" hosts="" telemetry=1 version="latest" binary="" service=1 uninstall=0 purge=0
+yes=0 interface="" hosts="" telemetry="" version="latest" binary="" service=1 uninstall=0 purge=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --yes|-y) yes=1 ;;
         --interface) interface="$2"; shift ;;
         --hosts) hosts="$2"; shift ;;
+        --telemetry) telemetry=1 ;;
         --no-telemetry) telemetry=0 ;;
         --version) version="$2"; shift ;;
         --binary) binary="$2"; shift ;;
@@ -136,6 +141,14 @@ else
     else
         warn "this release has no SHA256SUMS: installed without a checksum"
     fi
+    # the checksums come from the same place as the binary; the attestation
+    # proves GitHub Actions built it from this repository
+    case "$version" in v1.0.[0-3]) attest=0 ;; *) attest=1 ;; esac # older releases have none
+    if [ "$attest" = 1 ] && command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+        gh attestation verify "$tmp/xdp-loader" --repo "$REPO" >"$tmp/attest.log" 2>&1 \
+            || { cat "$tmp/attest.log" >&2; die "the build attestation does not match: refusing to install"; }
+        ok "build attestation verified (GitHub Actions, $REPO)"
+    fi
 fi
 chmod 755 "$tmp/xdp-loader"
 
@@ -167,6 +180,11 @@ if [ ! -f "$CONF" ]; then
     [ "$blind" = 1 ] && set_key xdp adopt '"blind"'
     set_key metrics enabled true
     sed -i 's|^# addr = "127.0.0.1:1999"|addr = "127.0.0.1:1999"|' "$CONF"
+    if [ -z "$telemetry" ]; then
+        echo "  Telemetry: every 30 min an anonymous report (version, kernel, player and packet"
+        echo "  counts; no addresses, host names or config) for the totals on https://stats.olune.me"
+        case "$(ask "Send it? [Y/n]" y)" in [nN]*) telemetry=0 ;; *) telemetry=1 ;; esac
+    fi
     [ "$telemetry" = 0 ] && set_key telemetry enabled false
     ok "$CONF written${hosts:+ (hosts: $hosts)}"
 else
@@ -213,7 +231,7 @@ fi
 echo
 "$BIN" doctor -c "$CONF" || true
 echo
-if [ "$telemetry" = 1 ] && grep -q '^enabled = true' <(awk '/^\[telemetry\]/{f=1;next} /^\[/{f=0} f' "$CONF"); then
+if [ "$telemetry" != 0 ] && grep -q '^enabled = true' <(awk '/^\[telemetry\]/{f=1;next} /^\[/{f=0} f' "$CONF"); then
     echo "  Telemetry is on: anonymous counts, see https://github.com/$REPO#telemetry (off: [telemetry] enabled = false)"
 fi
 echo "  Config:  $CONF, then: systemctl reload minecraft-xdp"

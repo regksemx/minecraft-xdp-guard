@@ -78,8 +78,13 @@ doctor.
 
 **Run it again to upgrade**: the config stays, and the new binary takes over
 the running filter without disconnecting anybody. Options: `--yes` (no
-questions), `--hosts a,b`, `--interface eth0`, `--no-telemetry`,
+questions), `--hosts a,b`, `--interface eth0`, `--telemetry` /
+`--no-telemetry` (answer the [telemetry](#telemetry) question up front),
 `--version v1.0.2`, `--uninstall` (`--purge` removes config and state too).
+
+Every download is checked against the release's SHA256SUMS, and, when an
+authenticated `gh` is on the machine, against its build attestation from
+GitHub Actions. To check by hand, see [SECURITY.md](SECURITY.md#verifying-a-release).
 
 ### The doctor
 
@@ -337,7 +342,8 @@ gone.
 
 Like [bStats](https://bstats.org) for plugins, the loader sends a small
 anonymous report every 30 minutes, so that the project can see how many
-servers and players it protects. The totals are public, with charts of
+servers and players it protects. The installer asks before turning it on
+(`--yes` takes the default, yes). The totals are public, with charts of
 players, servers, versions and setups: **[stats.olune.me](https://stats.olune.me/)**.
 
 <details>
@@ -468,6 +474,13 @@ sudo dev/e2e-test.sh          # the real loader between a client and stand-in se
 sudo dev/load-test.sh         # spoofed floods from all cpus while real clients keep playing
 dev/run.sh dev/bench/attack.sh # the benchmarks behind docs/benchmarks.md
 ```
+
+## Contributing
+
+Bugs and questions go to [issues](../../issues) and
+[discussions](../../discussions), security problems privately, see
+[SECURITY.md](SECURITY.md). How to build, test and send a change:
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits and license
 

@@ -5,6 +5,9 @@ on:
 # needed to push the version-bump commit and to create the GitHub release
 permissions:
   contents: write
+  # build provenance attestations for the release files (gh attestation verify)
+  id-token: write
+  attestations: write
 env:
   CARGO_TERM_COLOR: always
 # serialize releases so two pushes can not race on the version/tag
@@ -55,15 +58,25 @@ jobs:
       # the binary embeds CARGO_PKG_VERSION at compile time, so building
       # before the bump makes it report the version it is released under
       run: cargo build --release --target x86_64-unknown-linux-musl
-    - name: Create release
+    - name: Collect release files
       if: steps.check.outputs.exists == 'false'
-      env:
-        GH_TOKEN: ${{ github.token }}
       run: |
         mkdir -p out
         cp target/x86_64-unknown-linux-musl/release/xdp-loader xdp/minecraft_filter.o out/
         # install.sh refuses a download that does not match
         (cd out && sha256sum xdp-loader minecraft_filter.o > SHA256SUMS)
+    - name: Attest build provenance
+      if: steps.check.outputs.exists == 'false'
+      uses: actions/attest-build-provenance@v4
+      with:
+        subject-path: |
+          out/xdp-loader
+          out/minecraft_filter.o
+    - name: Create release
+      if: steps.check.outputs.exists == 'false'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
         gh release create "v${{ steps.version.outputs.current }}" \
           out/xdp-loader out/minecraft_filter.o out/SHA256SUMS \
           --title "v${{ steps.version.outputs.current }}" \
