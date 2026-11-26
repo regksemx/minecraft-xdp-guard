@@ -372,6 +372,11 @@ No IP addresses, host names, ports or configuration values are sent. The
 collector ([`collector/`](collector)) keeps the latest report per id and does
 not store or log the address a report came from.
 
+A filter built from another branch or an older version can be counted
+without touching it: `xdp-loader report --state-dir <DIR> --metrics <URL>`
+from a systemd timer sends one report from its pinned tables and metrics and
+exits (`--print` shows it instead).
+
 **Turn it off** with `[telemetry] enabled = false`, or with
 `MINECRAFT_XDP_TELEMETRY=off` in the environment (`Environment=` in the
 systemd unit). The loader says at every start whether and where it reports; a

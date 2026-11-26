@@ -29,7 +29,7 @@ use crate::shutdown::Shutdown;
 /// regardless of the config.
 const ENV: &str = "MINECRAFT_XDP_TELEMETRY";
 const ID_FILE: &str = "telemetry-id";
-const REPORT_VERSION: u8 = 1;
+pub(crate) const REPORT_VERSION: u8 = 1;
 
 // enum flow_kind in xdp/common.h
 const FLOW_JAVA: u8 = 1;
@@ -39,22 +39,22 @@ const FLOW_ADOPTED: u8 = 5;
 const FLOW_VOICE: u8 = 7;
 
 #[derive(Debug, Serialize, PartialEq)]
-struct Report {
-    v: u8,
-    id: String,
-    version: &'static str,
-    kernel: String,
-    arch: &'static str,
-    cpus: usize,
+pub(crate) struct Report {
+    pub(crate) v: u8,
+    pub(crate) id: String,
+    pub(crate) version: String,
+    pub(crate) kernel: String,
+    pub(crate) arch: String,
+    pub(crate) cpus: usize,
     /// `None` when this loader took over the attachment of an earlier one.
-    mode: Option<String>,
-    features: Vec<&'static str>,
+    pub(crate) mode: Option<String>,
+    pub(crate) features: Vec<String>,
     /// `None` when the tables are not pinned and can not be read.
-    players: Option<Players>,
+    pub(crate) players: Option<Players>,
     /// `None` while `[metrics]` is disabled.
-    packets: Option<Packets>,
-    uptime_secs: u64,
-    interval_secs: u64,
+    pub(crate) packets: Option<Packets>,
+    pub(crate) uptime_secs: u64,
+    pub(crate) interval_secs: u64,
 }
 
 #[derive(Debug, Default, Serialize, PartialEq)]
@@ -66,9 +66,9 @@ pub struct Players {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
-struct Packets {
-    incoming: u64,
-    dropped: u64,
+pub(crate) struct Packets {
+    pub(crate) incoming: u64,
+    pub(crate) dropped: u64,
 }
 
 /// Whether reports are sent: the config, overridden by the environment.
@@ -190,14 +190,14 @@ impl Reporter {
         Report {
             v: REPORT_VERSION,
             id: self.id.clone(),
-            version: env!("CARGO_PKG_VERSION"),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             kernel: kernel_release(),
-            arch: std::env::consts::ARCH,
+            arch: std::env::consts::ARCH.to_string(),
             cpus: thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(0),
             mode: self.mode.clone(),
-            features: self.features.clone(),
+            features: self.features.iter().map(|f| f.to_string()).collect(),
             players: self
                 .players()
                 .map_err(|e| debug!("Telemetry: no player count ({e:#})"))
@@ -209,14 +209,19 @@ impl Reporter {
     }
 
     fn players(&self) -> Result<Players> {
-        count_players(&self.state_dir, self.tcp_idle_ns, self.udp_idle_ns)
+        count_players(&self.state_dir, self.tcp_idle_ns, self.udp_idle_ns, true)
     }
 }
 
 /// Verified game connections that saw a packet within their idle
 /// timeout. Entries of the tables expire lazily, so old ones are skipped
 /// by the time of their last window.
-pub fn count_players(state_dir: &Path, tcp_idle_ns: u64, udp_idle_ns: u64) -> Result<Players> {
+pub fn count_players(
+    state_dir: &Path,
+    tcp_idle_ns: u64,
+    udp_idle_ns: u64,
+    count_adopted: bool,
+) -> Result<Players> {
     let now = monotonic_ns();
     let mut players = Players::default();
     for (name, idle_ns) in [("verified_tcp", tcp_idle_ns), ("verified_udp", udp_idle_ns)] {
@@ -229,8 +234,12 @@ pub fn count_players(state_dir: &Path, tcp_idle_ns: u64, udp_idle_ns: u64) -> Re
                 continue;
             }
             match (name, entry[20]) {
-                ("verified_tcp", FLOW_JAVA | FLOW_ADOPTED) => players.java += 1,
-                ("verified_udp", FLOW_RAKNET | FLOW_ADOPTED) => players.bedrock += 1,
+                ("verified_tcp", FLOW_JAVA) => players.java += 1,
+                ("verified_udp", FLOW_RAKNET) => players.bedrock += 1,
+                // connections from before the start: game ones in this
+                // build, but other builds adopt other traffic as well
+                ("verified_tcp", FLOW_ADOPTED) if count_adopted => players.java += 1,
+                ("verified_udp", FLOW_ADOPTED) if count_adopted => players.bedrock += 1,
                 ("verified_udp", FLOW_ICE) => players.nethernet += 1,
                 ("verified_udp", FLOW_VOICE) => players.voice += 1,
                 _ => {}
@@ -263,7 +272,7 @@ fn features(config: &Config) -> Vec<&'static str> {
 
 /// The id of this installation: random, kept in `path`. If it can not be
 /// stored, a new one is used for every run.
-fn instance_id(path: &Path) -> String {
+pub(crate) fn instance_id(path: &Path) -> String {
     if let Ok(id) = std::fs::read_to_string(path) {
         let id = id.trim();
         if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -304,7 +313,7 @@ fn monotonic_ns() -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
 
-fn kernel_release() -> String {
+pub(crate) fn kernel_release() -> String {
     // SAFETY: utsname is plain data and uname fills it in.
     let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
     if unsafe { libc::uname(&mut uts) } != 0 {

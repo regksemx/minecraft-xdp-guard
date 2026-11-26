@@ -6,6 +6,7 @@ mod hosts;
 mod logging;
 mod metrics;
 mod pong;
+mod report;
 mod shutdown;
 mod telemetry;
 
@@ -24,6 +25,8 @@ Usage: xdp-loader [OPTIONS] <INTERFACE>
                                     filter, see `xdp-loader deny --help`
        xdp-loader detach [-c <FILE>] <INTERFACE>
                                     Remove a filter whose loader is gone
+       xdp-loader report [OPTIONS]  Send one telemetry report for a filter
+                                    this binary does not run, see --help
        xdp-loader doctor [-c <FILE>]
                                     Check the machine, the config and the
                                     running filter, and say what to change
@@ -114,6 +117,13 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().is_some_and(|arg| arg == "deny") {
         if let Err(e) = deny::run(&argv[1..]) {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if argv.first().is_some_and(|arg| arg == "report") {
+        if let Err(e) = report::run(&argv[1..]) {
             eprintln!("error: {e:#}");
             std::process::exit(1);
         }

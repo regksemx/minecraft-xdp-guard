@@ -204,6 +204,7 @@ pub fn run(args: &[String]) -> Result<bool> {
             &state_dir,
             config.limits.tcp_idle_secs * 1_000_000_000,
             config.limits.udp_idle_secs * 1_000_000_000,
+            true,
         ) {
             Ok(p) => r.ok(format!(
                 "players right now: {} Java, {} Bedrock, {} NetherNet, {} voice chat",
